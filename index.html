@@ -29,13 +29,27 @@
 
         header {
             margin-bottom: 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* Estilo para alinhar o ícone e o título */
+        .header-title-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header-title-container img {
+            width: 24px;
+            height: 24px;
         }
 
         header h1 {
             font-size: 18px;
             color: #e0e0e0;
             font-weight: 600;
-            margin-bottom: 4px;
         }
 
         header p {
@@ -132,9 +146,11 @@
 <body>
     <div class="container">
         <header>
-            <h1>Códigos para Console (⌐■_■)</h1>
-            <p>Chrome: Ctrl + Shift + J</p>
-            <p>Firefox: Ctrl + Shift + K</p>
+            <div class="header-title-container">
+                <img src="https://www.gstatic.com/classroom/logo_square_rounded.svg" alt="Classroom Logo">
+                <h1>Início - Sala de aula</h1>
+            </div>
+            <p>Chrome: Ctrl + Shift + J | Firefox: Ctrl + Shift + K</p>
         </header>
 
         <div class="disclaimer">
