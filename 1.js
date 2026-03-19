@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Quizizz Bypass
-// @version      51.0
+// @version      50.5
 // @description  Resolve questões do Quizizz
 // @author       ricinuss
 // @icon         https://tse1.mm.bing.net/th/id/OIP.Ydweh29BuHk_PGD4dGJXbAHaHa?rs=1&pid=ImgDetMain&o=7&rm=3
@@ -8,1547 +8,1134 @@
 // @grant        none
 // ==/UserScript==
 
-(function () {
+(function() {
     'use strict';
 
-    // ═══════════════════════════════════════════════════════════════
-    // CONFIGURATION
-    // ═══════════════════════════════════════════════════════════════
+    // -----------------------------------------------------------------------------------
+    // IMPORTANTE: LISTA DE CHAVES DE API
+    // -----------------------------------------------------------------------------------
+    const GEMINI_API_KEYS = [
+        "CHAVE_GEMINI_1",   // Chave 1
+        "CHAVE_GEMINI_2",  // Chave 2
+        "CHAVE_GEMINI_3"  // Chave 3
+    ];
+    // --- Integração OpenRouter/DeepSeek (v47) ---
+    const OPENROUTER_API_KEYS = [
+        "SUA_CHAVE_OPENROUTER_1",
+        "SUA_CHAVE_OPENROUTER_2",
+        "SUA_CHAVE_OPENROUTER_3"
+    ];
+    const DEEPSEEK_MODEL_NAME = "deepseek/deepseek-chat"; // Modelo DeepSeek
+    let currentAiProvider = 'gemini'; // Sempre Gemini
+    // -----------------------------------------------------------------------------------
 
-    const CONFIG = {
-        apiKeys: [
-            "CHAVE_GEMINI_1",
-            "CHAVE_GEMINI_2",
-            "CHAVE_GEMINI_3"
-        ],
-        model: 'gemini-2.5-flash',
-        get apiBaseUrl() {
-            return `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`;
-        },
-        timeouts: {
-            fetch: 15000,
-            elementWait: 5000,
-            popperWait: 2000,
-            uiDelay: 2000,
-            keypadDelay: 100,
-        },
-        selectors: {
-            questionText: '#questionText',
-            questionImage: 'img[data-testid="question-container-image"]',
-            optionText: '#optionText',
-            dropdownButton: 'button.options-dropdown',
-            popperShown: '.v-popper__popper--shown',
-            dropdownOption: 'button.dropdown-option',
-            equationEditor: 'div[data-cy="equation-editor"]',
-            droppableBlank: 'button.droppable-blank',
-            dragOption: '.drag-option',
-            matchContainer: '.match-order-options-container, .question-options-layout',
-            optionTile: '.match-order-option.is-option-tile',
-            dropTile: '.match-order-option.is-drop-tile',
-            openEndedTextarea: 'textarea[data-cy="open-ended-textarea"]',
-            selectableOption: '.option.is-selectable',
-            submitButton: '.submit-button-wrapper button, button.submit-btn',
-        },
-        highlightColors: ['#FFD700', '#00FFFF', '#FF00FF', '#7FFF00', '#FF8C00', '#DA70D6'],
-        quizIdRegex: /\/(?:quiz|quizzes|admin\/quiz|games|attempts|join)\/([a-f0-9]{24})/i,
-    };
+    let currentApiKeyIndex = 0;
+    let currentOpenRouterKeyIndex = 0;
+    let lastAiResponse = '';
 
-    // ═══════════════════════════════════════════════════════════════
-    // STATE
-    // ═══════════════════════════════════════════════════════════════
+    // --- DETECÇÃO DE QUIZ ID (v46) ---
+    const regexQuizId = /\/(?:quiz|quizzes|admin\/quiz|games|attempts|join)\/([a-f0-9]{24})/i;
+    let quizIdDetected = null;
+    let interceptorsStarted = false;
+    // -----------------------------------
 
-    const state = {
-        currentKeyIndex: 0,
-        lastAiResponse: '',
-        quizIdDetected: null,
-        interceptorsStarted: false,
-    };
+    // --- FUNÇÕES UTILITÁRIAS ---
 
-    // ═══════════════════════════════════════════════════════════════
-    // UTILITIES
-    // ═══════════════════════════════════════════════════════════════
-
-    const Utils = {
-        /**
-         * Waits for element(s) to appear in the DOM.
-         */
-        waitForElement(selector, { all = false, timeout = CONFIG.timeouts.elementWait } = {}) {
-            return new Promise((resolve, reject) => {
-                const check = () => {
-                    const result = all
-                        ? document.querySelectorAll(selector)
-                        : document.querySelector(selector);
-                    const found = all ? result.length > 0 : !!result;
-                    return found ? result : null;
-                };
-
-                // Check immediately first
-                const immediate = check();
-                if (immediate) return resolve(immediate);
-
-                const startTime = Date.now();
-                const interval = setInterval(() => {
-                    const result = check();
-                    if (result) {
-                        clearInterval(interval);
-                        resolve(result);
-                    } else if (Date.now() - startTime > timeout) {
-                        clearInterval(interval);
-                        reject(new Error(`"${selector}" not found after ${timeout}ms`));
-                    }
-                }, 100);
-            });
-        },
-
-        /**
-         * Waits for an element to disappear from the DOM.
-         */
-        waitForDisappear(selector, timeout = CONFIG.timeouts.elementWait) {
-            return new Promise((resolve, reject) => {
-                if (!document.querySelector(selector)) return resolve();
-
-                const startTime = Date.now();
-                const interval = setInterval(() => {
-                    if (!document.querySelector(selector)) {
-                        clearInterval(interval);
-                        resolve();
-                    } else if (Date.now() - startTime > timeout) {
-                        clearInterval(interval);
-                        reject(new Error(`"${selector}" didn't disappear after ${timeout}ms`));
-                    }
-                }, 100);
-            });
-        },
-
-        /**
-         * Fetch with automatic timeout via AbortController.
-         */
-        async fetchWithTimeout(url, options = {}, timeout = CONFIG.timeouts.fetch) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeout);
-            try {
-                const response = await fetch(url, { ...options, signal: controller.signal });
-                return response;
-            } catch (error) {
-                if (error.name === 'AbortError') {
-                    throw new Error('Request timed out.');
+    function waitForElement(selector, all = false, timeout = 5000) {
+        return new Promise((resolve, reject) => {
+            const startTime = Date.now();
+            const interval = setInterval(() => {
+                const elements = all ? document.querySelectorAll(selector) : document.querySelector(selector);
+                if ((all && elements.length > 0) || (!all && elements)) {
+                    clearInterval(interval);
+                    resolve(elements);
+                } else if (Date.now() - startTime > timeout) {
+                    clearInterval(interval);
+                    reject(new Error(`Elemento(s) "${selector}" não encontrado(s) após ${timeout / 1000} segundos.`));
                 }
-                throw error;
-            } finally {
-                clearTimeout(timer);
-            }
-        },
+            }, 100);
+        });
+    }
 
-        /**
-         * Converts an image URL to a base64 data URL.
-         */
-        async imageToBase64(url) {
-            try {
-                const cacheBust = new URL(url);
-                cacheBust.searchParams.set('_t', Date.now());
-
-                const response = await this.fetchWithTimeout(cacheBust.href, { cache: 'no-store' });
-                const blob = await response.blob();
-
-                return new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve(reader.result);
-                    reader.onerror = reject;
-                    reader.readAsDataURL(blob);
-                });
-            } catch (e) {
-                console.error(`Failed to convert image: ${e.message}`, url);
-                return null;
-            }
-        },
-
-        /**
-         * Normalizes text for comparison (removes special chars, lowercases).
-         */
-        normalize(str) {
-            if (typeof str !== 'string') return '';
-            return str
-                .replace(/[^a-zA-Z\u00C0-\u017F0-9\s²³]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .toLowerCase();
-        },
-
-        /**
-         * Cleans quotes and backticks from AI response text.
-         */
-        cleanQuotes(str) {
-            return str.replace(/["'`]/g, '').trim();
-        },
-
-        /**
-         * Extracts text from an option element, preferring MathML annotations.
-         */
-        extractOptionText(el) {
-            const mathEl = el.querySelector('annotation[encoding="application/x-tex"]');
-            if (mathEl) return mathEl.textContent.trim();
-            return el.querySelector(CONFIG.selectors.optionText)?.innerText.trim() || '';
-        },
-
-        /**
-         * Parses "A -> B" pairs from AI response text.
-         */
-        parsePairings(text) {
-            return text
-                .split('\n')
-                .filter(line => line.includes('->'))
-                .map(line => {
-                    const parts = line.split('->');
-                    if (parts.length !== 2) return null;
-                    return [this.cleanQuotes(parts[0]), this.cleanQuotes(parts[1])];
-                })
-                .filter(Boolean);
-        },
-
-        /**
-         * Simple delay promise.
-         */
-        delay(ms) {
-            return new Promise(r => setTimeout(r, ms));
-        },
-
-        /**
-         * Safely closes a popper if it's open.
-         */
-        async closePopper() {
-            if (document.querySelector(CONFIG.selectors.popperShown)) {
-                document.body.click();
-                try {
-                    await this.waitForDisappear(
-                        CONFIG.selectors.popperShown,
-                        CONFIG.timeouts.popperWait
-                    );
-                } catch {
-                    console.warn('Popper did not close, continuing...');
+    function waitForElementToDisappear(selector, timeout = 5000) {
+        return new Promise((resolve, reject) => {
+            const startTime = Date.now();
+            const interval = setInterval(() => {
+                const element = document.querySelector(selector);
+                if (!element) {
+                    clearInterval(interval);
+                    resolve();
+                } else if (Date.now() - startTime > timeout) {
+                    clearInterval(interval);
+                    reject(new Error(`Elemento "${selector}" não desapareceu após ${timeout / 1000} segundos.`));
                 }
-            }
-        },
-    };
+            }, 100);
+        });
+    }
 
-    // ═══════════════════════════════════════════════════════════════
-    // QUESTION EXTRACTOR
-    // ═══════════════════════════════════════════════════════════════
+    // --- LÓGICA DO RESOLVEDOR ---
 
-    const QuestionExtractor = {
-        /**
-         * Main extraction method - detects question type and extracts data.
-         */
-        async extract() {
-            try {
-                const base = this._extractBase();
-                const { questionText, questionImageUrl } = base;
+    async function extrairDadosDaQuestao() {
+    try {
+        const questionTextElement = document.querySelector('#questionText');
+        const questionText = questionTextElement ? questionTextElement.innerText.trim().replace(/\s+/g, ' ') : "Não foi possível encontrar o texto da pergunta.";
+        const questionImageElement = document.querySelector('img[data-testid="question-container-image"]');
+        const questionImageUrl = questionImageElement ? questionImageElement.src : null;
 
-                // Try each detector in priority order
-                const detectors = [
-                    () => this._detectMultiDropdown(base),
-                    () => this._detectSingleDropdown(base),
-                    () => this._detectEquation(base),
-                    () => this._detectMultiDragIntoBlank(base),
-                    () => this._detectSingleDragIntoBlank(base),
-                    () => this._detectMatchOrder(base),
-                    () => this._detectOpenEnded(base),
-                    () => this._detectChoiceOptions(base),
-                ];
+        const extractText = (el) => {
+            const mathElement = el.querySelector('annotation[encoding="application/x-tex"]');
+            return mathElement ? mathElement.textContent.trim() : el.querySelector('#optionText')?.innerText.trim() || '';
+        };
 
-                for (const detect of detectors) {
-                    const result = detect();
-                    if (result) return result;
-                }
+        const dropdownButtons = document.querySelectorAll('button.options-dropdown');
+        if (dropdownButtons.length > 1) {
+            console.log("Tipo Múltiplos Dropdowns detectado.");
+            const dropdowns = [];
+            let questionTextWithPlaceholders = questionTextElement.innerHTML;
+            const popperSelector = '.v-popper__popper--shown';
 
-                console.error('Unrecognized question type.');
-                return null;
-            } catch (error) {
-                console.error('Error extracting question data:', error);
-                return null;
-            }
-        },
-
-        _extractBase() {
-            const textEl = document.querySelector(CONFIG.selectors.questionText);
-            const questionText = textEl
-                ? textEl.innerText.trim().replace(/\s+/g, ' ')
-                : 'Could not find question text.';
-
-            const imgEl = document.querySelector(CONFIG.selectors.questionImage);
-            const questionImageUrl = imgEl?.src || null;
-
-            return { questionText, questionImageUrl, textElement: textEl };
-        },
-
-        _detectMultiDropdown({ questionText, questionImageUrl, textElement }) {
-            const buttons = document.querySelectorAll(CONFIG.selectors.dropdownButton);
-            if (buttons.length <= 1) return null;
-
-            console.log('Multi-dropdown type detected.');
-
-            // Build question text with placeholders
-            let html = textElement?.innerHTML || '';
-            buttons.forEach((btn, i) => {
+            dropdownButtons.forEach((btn, i) => {
+                const placeholder = ` [RESPOSTA ${i + 1}] `;
                 const wrapper = btn.closest('.dropdown-wrapper');
                 if (wrapper) {
-                    html = html.replace(wrapper.outerHTML, ` [RESPOSTA ${i + 1}] `);
+                     questionTextWithPlaceholders = questionTextWithPlaceholders.replace(wrapper.outerHTML, placeholder);
                 }
             });
 
-            const temp = document.createElement('div');
-            temp.innerHTML = html;
-            const cleanText = temp.innerText.replace(/\s+/g, ' ').trim();
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = questionTextWithPlaceholders;
+            const cleanQuestionText = tempDiv.innerText.replace(/\s+/g, ' ');
 
-            const dropdowns = Array.from(buttons).map((btn, i) => ({
-                button: btn,
-                placeholder: `[RESPOSTA ${i + 1}]`,
-            }));
+            let allAvailableOptions = [];
+            const firstBtn = dropdownButtons[0];
+            firstBtn.click();
+            try {
+                const optionElements = await waitForElement(`${popperSelector} button.dropdown-option`, true, 2000);
+                allAvailableOptions = Array.from(optionElements).map(el => el.innerText.trim());
+                console.log("Pool de opções detectado:", allAvailableOptions);
+            } catch (e) {
+                console.error("Falha ao ler o pool de opções do primeiro dropdown.", e);
+                if (document.querySelector(popperSelector)) document.body.click();
+            }
 
-            return {
-                questionText: cleanText,
-                questionImageUrl,
-                questionType: 'multi_dropdown',
-                dropdowns,
-                allAvailableOptions: [], // Will be populated later
-                _dropdownButtons: buttons,
-            };
-        },
+            if (document.querySelector(popperSelector)) document.body.click();
+            try {
+                await waitForElementToDisappear(popperSelector, 2000);
+            } catch (e) {
+                console.warn("Popper não fechou, mas continuando...");
+            }
 
-        _detectSingleDropdown({ questionText, questionImageUrl }) {
-            const buttons = document.querySelectorAll(CONFIG.selectors.dropdownButton);
-            if (buttons.length !== 1) return null;
-
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: 'dropdown',
-                dropdownButton: buttons[0],
-            };
-        },
-
-        _detectEquation({ questionText, questionImageUrl }) {
-            if (!document.querySelector(CONFIG.selectors.equationEditor)) return null;
-
-            return { questionText, questionImageUrl, questionType: 'equation' };
-        },
-
-        _detectMultiDragIntoBlank({ questionText, questionImageUrl }) {
-            const blanks = document.querySelectorAll(CONFIG.selectors.droppableBlank);
-            const drags = document.querySelectorAll(CONFIG.selectors.dragOption);
-            if (blanks.length <= 1 || drags.length === 0) return null;
-
-            const container = document.querySelector('.drag-drop-text > div');
-            const dropZones = [];
-
-            if (container) {
-                const children = Array.from(container.children);
-                children.forEach((child, i) => {
-                    const blank = child.querySelector(CONFIG.selectors.droppableBlank);
-                    if (!blank) return;
-
-                    const prev = children[i - 1];
-                    if (prev?.tagName === 'SPAN') {
-                        const prompt = prev.innerText.trim()
-                            .replace(/:\s*$/, '')
-                            .replace(/\s+/g, ' ');
-                        dropZones.push({ prompt, blankElement: blank });
-                    }
+            dropdownButtons.forEach((btn, i) => {
+                 dropdowns.push({
+                    button: btn,
+                    placeholder: `[RESPOSTA ${i + 1}]`
                 });
-            }
+            });
 
-            const draggableOptions = Array.from(drags).map(el => ({
-                text: el.innerText.trim(),
-                element: el,
-            }));
+            console.log("Texto Limpo Enviado para IA:", cleanQuestionText);
+            return { questionText: cleanQuestionText, questionImageUrl, questionType: 'multi_dropdown', dropdowns, allAvailableOptions };
+        }
 
-            return {
-                questionText: container?.innerText.trim() || questionText,
-                questionImageUrl,
-                questionType: 'multi_drag_into_blank',
-                draggableOptions,
-                dropZones,
-            };
-        },
+        if (dropdownButtons.length === 1) {
+            return { questionText, questionImageUrl, questionType: 'dropdown', dropdownButton: dropdownButtons[0] };
+        }
 
-        _detectSingleDragIntoBlank({ questionText, questionImageUrl }) {
-            const blanks = document.querySelectorAll(CONFIG.selectors.droppableBlank);
-            const drags = document.querySelectorAll(CONFIG.selectors.dragOption);
-            if (blanks.length !== 1 || drags.length === 0) return null;
-
-            const draggableOptions = Array.from(drags).map(el => ({
-                text: el.querySelector('.dnd-option-text')?.innerText.trim() || '',
-                element: el,
-            }));
-
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: 'drag_into_blank',
-                draggableOptions,
-                dropZone: { element: blanks[0] },
-            };
-        },
-
-        _detectMatchOrder({ questionText, questionImageUrl }) {
-            const container = document.querySelector(CONFIG.selectors.matchContainer);
-            if (!container) return null;
-
-            const optionTiles = Array.from(
-                container.querySelectorAll(CONFIG.selectors.optionTile)
-            );
-            const dropTiles = Array.from(
-                container.querySelectorAll(CONFIG.selectors.dropTile)
-            );
-
-            if (optionTiles.length === 0 || dropTiles.length === 0) return null;
-
-            const isImageMatch = optionTiles[0].querySelector('.option-image')
-                || optionTiles[0].dataset.type === 'image';
-
-            if (isImageMatch) {
-                return this._extractImageMatch(
-                    questionText, questionImageUrl, optionTiles, dropTiles
-                );
-            }
-
-            const draggableItems = optionTiles.map(el => ({
-                text: Utils.extractOptionText(el),
-                element: el,
-            }));
-            const dropZones = dropTiles.map(el => ({
-                text: Utils.extractOptionText(el),
-                element: el,
-            }));
-
-            const isReorder = questionText.toLowerCase().includes('reorder');
-
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: isReorder ? 'reorder' : 'match_order',
-                draggableItems,
-                dropZones,
-            };
-        },
-
-        _extractImageMatch(questionText, questionImageUrl, optionTiles, dropTiles) {
-            console.log('Image-to-text match type detected.');
-
-            const draggableItems = [];
-            optionTiles.forEach((el, i) => {
-                let imageUrl = null;
-
-                // Try background-image
-                const imgDiv = el.querySelector('.option-image');
-                if (imgDiv) {
-                    const bg = window.getComputedStyle(imgDiv).backgroundImage;
-                    const match = bg?.match(/url\("(.+?)"\)/);
-                    if (match) imageUrl = match[1];
-                }
-
-                // Fallback: data-cy attribute
-                if (!imageUrl) {
-                    const dataCy = el.dataset.cy;
-                    if (dataCy?.includes('url(')) {
-                        const match = dataCy.match(/url\((.+)\)/);
-                        if (match) {
-                            imageUrl = match[1].replace(/\?w=\d+&h=\d+$/, '');
+        const equationEditor = document.querySelector('div[data-cy="equation-editor"]');
+        if (equationEditor) {
+            return { questionText, questionImageUrl, questionType: 'equation' };
+        }
+        const droppableBlanks = document.querySelectorAll('button.droppable-blank');
+        const dragOptions = document.querySelectorAll('.drag-option');
+        if (droppableBlanks.length > 1 && dragOptions.length > 0) {
+            const questionContainer = document.querySelector('.drag-drop-text > div');
+            const dropZones = [];
+            if (questionContainer) {
+                const children = Array.from(questionContainer.children);
+                for (let i = 0; i < children.length; i++) {
+                    const blankButton = children[i].querySelector('button.droppable-blank');
+                    if (blankButton) {
+                        const precedingSpan = children[i - 1];
+                        if (precedingSpan && precedingSpan.tagName === 'SPAN') {
+                            let promptText = precedingSpan.innerText.trim().replace(/:\s*$/, '').replace(/\s+/g, ' ');
+                            dropZones.push({ prompt: promptText, blankElement: blankButton });
                         }
                     }
                 }
+            }
+            const draggableOptions = Array.from(dragOptions).map(el => ({ text: el.innerText.trim(), element: el }));
+            return { questionText: questionContainer.innerText.trim(), questionImageUrl, questionType: 'multi_drag_into_blank', draggableOptions, dropZones };
+        }
+        if (droppableBlanks.length === 1 && dragOptions.length > 0) {
+             const draggableOptions = Array.from(dragOptions).map(el => ({ text: el.querySelector('.dnd-option-text')?.innerText.trim() || '', element: el }));
+            return { questionText, questionImageUrl, questionType: 'drag_into_blank', draggableOptions, dropZone: { element: droppableBlanks[0] } };
+        }
 
-                if (imageUrl) {
-                    draggableItems.push({
-                        id: `IMAGEM ${i + 1}`,
-                        imageUrl,
-                        element: el,
-                    });
+        const matchContainer = document.querySelector('.match-order-options-container, .question-options-layout');
+        if (matchContainer) {
+            const draggableItemElements = Array.from(matchContainer.querySelectorAll('.match-order-option.is-option-tile'));
+            const dropZoneElements = Array.from(matchContainer.querySelectorAll('.match-order-option.is-drop-tile'));
+
+            const isImageMatch = draggableItemElements.length > 0 && (draggableItemElements[0].querySelector('.option-image') || draggableItemElements[0].dataset.type === 'image');
+
+            if (isImageMatch) {
+                console.log("Tipo Match-Order (Imagem p/ Texto) detectado.");
+                const draggableItems = [];
+                for (let i = 0; i < draggableItemElements.length; i++) {
+                    const el = draggableItemElements[i];
+                    const imgDiv = el.querySelector('.option-image');
+                    const style = imgDiv ? window.getComputedStyle(imgDiv).backgroundImage : null;
+                    const urlMatch = style ? style.match(/url\("(.+?)"\)/) : null;
+                    let imageUrl = urlMatch ? urlMatch[1] : null;
+
+                    if (!imageUrl) {
+                        const dataCy = el.dataset.cy;
+                        if (dataCy && dataCy.includes('url(')) {
+                            const urlMatchCy = dataCy.match(/url\((.+)\)/);
+                            if (urlMatchCy) imageUrl = urlMatchCy[1].replace(/\?w=\d+&h=\d+$/, '');
+                        }
+                    }
+
+                    if (imageUrl) {
+                        draggableItems.push({ id: `IMAGEM ${i + 1}`, imageUrl, element: el });
+                    }
                 }
-            });
 
-            const dropZones = dropTiles.map(el => ({
-                text: Utils.extractOptionText(el),
-                element: el,
-            }));
+                const dropZones = dropZoneElements.map(el => ({ text: extractText(el), element: el }));
 
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: 'match_image_to_text',
-                draggableItems,
-                dropZones,
-            };
-        },
+                return { questionText, questionImageUrl, questionType: 'match_image_to_text', draggableItems, dropZones };
 
-        _detectOpenEnded({ questionText, questionImageUrl }) {
-            const textarea = document.querySelector(CONFIG.selectors.openEndedTextarea);
-            if (!textarea) return null;
+            } else if (draggableItemElements.length > 0 && dropZoneElements.length > 0) {
+                const draggableItems = draggableItemElements.map(el => ({ text: extractText(el), element: el }));
+                const dropZones = dropZoneElements.map(el => ({ text: extractText(el), element: el }));
 
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: 'open_ended',
-                answerElement: textarea,
-            };
-        },
+                const questionType = questionText.toLowerCase().includes('reorder') ? 'reorder' : 'match_order';
+                return { questionText, questionImageUrl, questionType, draggableItems, dropZones };
+            }
+        }
 
-        _detectChoiceOptions({ questionText, questionImageUrl }) {
-            const options = document.querySelectorAll(CONFIG.selectors.selectableOption);
-            if (options.length === 0) return null;
+        const openEndedTextarea = document.querySelector('textarea[data-cy="open-ended-textarea"]');
+        if (openEndedTextarea) {
+            return { questionText, questionImageUrl, questionType: 'open_ended', answerElement: openEndedTextarea };
+        }
+        const optionElements = document.querySelectorAll('.option.is-selectable');
+        if (optionElements.length > 0) {
+            const isMultipleChoice = Array.from(optionElements).some(el => el.classList.contains('is-msq'));
+            const options = Array.from(optionElements).map(el => ({ text: extractText(el), element: el }));
+            return { questionText, questionImageUrl, questionType: isMultipleChoice ? 'multiple_choice' : 'single_choice', options };
+        }
+        console.error("Tipo de questão não reconhecido.");
+        return null;
+    } catch (error) {
+        console.error("Erro ao extrair dados da questão:", error);
+        return null;
+    }
+}
 
-            const isMultiple = Array.from(options).some(el =>
-                el.classList.contains('is-msq')
-            );
-            const optionData = Array.from(options).map(el => ({
-                text: Utils.extractOptionText(el),
-                element: el,
-            }));
+    async function obterRespostaDaIA(quizData) {
+        lastAiResponse = '';
+        const viewResponseBtn = document.getElementById('view-raw-response-btn');
+        if (viewResponseBtn) viewResponseBtn.style.display = 'none';
 
-            return {
-                questionText,
-                questionImageUrl,
-                questionType: isMultiple ? 'multiple_choice' : 'single_choice',
-                options: optionData,
-            };
-        },
-    };
+        // --- 1. Lógica de Prompt ---
+        let promptDeInstrucao = "", formattedOptions = "";
+        switch (quizData.questionType) {
+            case 'multi_dropdown':
+                promptDeInstrucao = `Esta é uma questão com múltiplas lacunas ([RESPOSTA X]). As opções disponíveis são um pool compartilhado e cada opção só pode ser usada uma vez. Determine a resposta correta para CADA placeholder. Responda com cada resposta em uma nova linha, no formato '[RESPOSTA X]: Resposta Correta'. Se algum placeholder não tiver uma resposta lógica no pool (ex: está fora da sequência), omita-o da resposta.`;
+                formattedOptions = "Pool de Opções Disponíveis: " + quizData.allAvailableOptions.join(', ');
+                break;
+            case 'match_image_to_text':
+                promptDeInstrucao = `Esta é uma questão de combinar imagens com seus textos correspondentes. Para cada imagem, forneça o par correto no formato EXATO: 'Texto da Opção -> ID da Imagem' (ex: 90° -> IMAGEM 3), com cada par em uma nova linha.`;
+                const dropZoneTexts = quizData.dropZones.map(item => `- "${item.text}"`).join('\n');
+                formattedOptions = `Opções de Texto (Locais para Soltar):\n${dropZoneTexts}`;
+                break;
+            case 'match_order':
+                promptDeInstrucao = `Responda com os pares no formato EXATO: 'Texto do Local para Soltar -> Texto do Item para Arrastar', com cada par em uma nova linha.`;
+                const draggables = quizData.draggableItems.map(item => `- "${item.text}"`).join('\n');
+                const droppables = quizData.dropZones.map(item => `- "${item.text}"`).join('\n');
+                formattedOptions = `Itens para Arrastar:\n${draggables}\n\nLocais para Soltar:\n${droppables}`;
+                break;
+            case 'multi_drag_into_blank': promptDeInstrucao = `Esta é uma questão de combinar múltiplas sentenças com suas expressões corretas. Responda com os pares no formato EXATO: 'Sentença da pergunta -> Expressão da opção', com cada par em uma nova linha.`; const prompts = quizData.dropZones.map(item => `- "${item.prompt}"`).join('\n'); const options = quizData.draggableOptions.map(item => `- "${item.text}"`).join('\n'); formattedOptions = `Sentenças:\n${prompts}\n\nExpressões (Opções):\n${options}`; break;
+            case 'equation': promptDeInstrucao = `Resolva a seguinte equação ou inequação. Forneça apenas a expressão final simplificada (ex: x = 5, ou y > 3).`; formattedOptions = `EQUAÇÃO: "${quizData.questionText}"`; break;
+            case 'dropdown': case 'single_choice': promptDeInstrucao = `Responda APENAS com o texto exato da ÚNICA alternativa correta.`; formattedOptions = "OPÇÕES:\n" + quizData.options.map(opt => `- "${opt.text}"`).join('\n'); break;
+            case 'reorder': promptDeInstrucao = `A tarefa é: "${quizData.questionText}". Forneça a ordem correta listando os textos dos itens, um por linha, do primeiro ao último.`; formattedOptions = "Itens para ordenar:\n" + quizData.draggableItems.map(item => `- "${item.text}"`).join('\n'); break;
+            case 'drag_into_blank': promptDeInstrucao = `Responda APENAS com o texto da ÚNICA opção correta que preenche a lacuna.`; formattedOptions = "Opções para arrastar:\n" + quizData.draggableOptions.map(item => `- "${item.text}"`).join('\n'); break;
+            case 'open_ended': promptDeInstrucao = `Responda APENAS com a palavra ou frase curta que preenche a lacuna.`; break;
+            case 'multiple_choice': promptDeInstrucao = `Responda APENAS com os textos exatos de TODAS as alternativas corretas, separando cada uma em uma NOVA LINHA.`; formattedOptions = "OPÇÕES:\n" + quizData.options.map(opt => `- "${opt.text}"`).join('\n'); break;
+        }
+        let textPrompt = `${promptDeInstrucao}\n\n---\nPERGUNTA: "${quizData.questionText}"\n---\n${formattedOptions}`;
 
-    // ═══════════════════════════════════════════════════════════════
-    // PROMPT BUILDER
-    // ═══════════════════════════════════════════════════════════════
+        // --- 2. Processamento de Imagem ---
+        let base64Image = null;
+        if (quizData.questionImageUrl) {
+            base64Image = await imageUrlToBase64(quizData.questionImageUrl);
+        }
+        const hasDraggableImages = quizData.questionType === 'match_image_to_text';
 
-    const PromptBuilder = {
-        /**
-         * Builds the text prompt based on question type.
-         */
-        build(quizData) {
-            const builder = this._builders[quizData.questionType];
-            if (!builder) {
-                console.error(`No prompt builder for type: ${quizData.questionType}`);
-                return '';
+        // --- 3. Lógica de Fetch ---
+        try {
+            let aiResponseText = null;
+            console.log("Usando Provedor: Gemini");
+            let geminiKeyFailed = false;
+            for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+                const currentKey = GEMINI_API_KEYS[currentApiKeyIndex];
+                if (!currentKey || currentKey.includes("SUA_") || currentKey.length < 30) {
+                    console.warn(`Chave de API Gemini #${currentApiKeyIndex + 1} parece ser um placeholder. Pulando...`);
+                    currentApiKeyIndex = (currentApiKeyIndex + 1) % GEMINI_API_KEYS.length;
+                    continue;
+                }
+                const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${currentKey}`;
+
+                let promptParts = [{ text: textPrompt }];
+
+                if (base64Image) {
+                    const [header, data] = base64Image.split(',');
+                    let mimeType = header.match(/:(.*?);/)[1];
+                    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
+                    promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
+                }
+
+                if (quizData.questionType === 'match_image_to_text') {
+                    promptParts.push({ text: "\n\nIMAGENS (Itens para Arrastar):\n" });
+                    for (const item of quizData.draggableItems) {
+                         const base64 = await imageUrlToBase64(item.imageUrl);
+                         if (base64) {
+                            const [header, data] = base64.split(',');
+                            let mimeType = header.match(/:(.*?);/)[1];
+                            if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
+                            promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
+                            promptParts.push({ text: `- ${item.id}` });
+                         }
+                    }
+                }
+
+                try {
+                    const response = await fetchWithTimeout(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ contents: [{ parts: promptParts }] })
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        aiResponseText = data.candidates[0].content.parts[0].text;
+                        console.log(`Sucesso com a Chave API Gemini #${currentApiKeyIndex + 1}.`);
+                        break;
+                    }
+                    const errorData = await response.json();
+                    const errorMessage = errorData.error?.message || `Erro ${response.status}`;
+                    console.warn(`Chave API Gemini #${currentApiKeyIndex + 1} falhou: ${errorMessage}. Tentando a próxima...`);
+                    lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${errorMessage}`;
+                } catch (error) {
+                    console.warn(`Erro na requisição com a Chave API Gemini #${currentApiKeyIndex + 1}: ${error.message}. Tentando a próxima...`);
+                    lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${error.message}`;
+                }
+                currentApiKeyIndex = (currentApiKeyIndex + 1) % GEMINI_API_KEYS.length;
+                if (i === GEMINI_API_KEYS.length - 1) {
+                     geminiKeyFailed = true;
+                }
+            }
+            if (!aiResponseText && geminiKeyFailed) {
+                throw new Error("Todas as chaves de API do Gemini falharam.");
             }
 
-            const { instruction, options } = builder(quizData);
-            return [
-                instruction,
-                '',
-                '---',
-                `PERGUNTA: "${quizData.questionText}"`,
-                '---',
-                options,
-            ].filter(Boolean).join('\n');
-        },
+            // --- 4. Retorno ---
+            console.log("Resposta bruta da IA:", aiResponseText);
+            lastAiResponse = aiResponseText;
+            return aiResponseText;
 
-        _builders: {
-            multi_dropdown(data) {
-                return {
-                    instruction: `Esta é uma questão com múltiplas lacunas ([RESPOSTA X]). As opções disponíveis são um pool compartilhado e cada opção só pode ser usada uma vez. Determine a resposta correta para CADA placeholder. Responda com cada resposta em uma nova linha, no formato '[RESPOSTA X]: Resposta Correta'. Se algum placeholder não tiver uma resposta lógica no pool, omita-o.`,
-                    options: 'Pool de Opções Disponíveis: ' + data.allAvailableOptions.join(', '),
-                };
-            },
+        } catch (error) {
+            console.error(`Falha ao obter resposta da IA (${currentAiProvider}):`, error.message);
+            lastAiResponse = `Erro: ${error.message}`;
+            throw error;
+        }
+    }
 
-            match_image_to_text(data) {
-                const texts = data.dropZones.map(i => `- "${i.text}"`).join('\n');
-                return {
-                    instruction: `Esta é uma questão de combinar imagens com seus textos correspondentes. Para cada imagem, forneça o par correto no formato EXATO: 'Texto da Opção -> ID da Imagem' (ex: 90° -> IMAGEM 3), com cada par em uma nova linha.`,
-                    options: `Opções de Texto (Locais para Soltar):\n${texts}`,
-                };
-            },
 
-            match_order(data) {
-                const draggables = data.draggableItems.map(i => `- "${i.text}"`).join('\n');
-                const droppables = data.dropZones.map(i => `- "${i.text}"`).join('\n');
-                return {
-                    instruction: `Responda com os pares no formato EXATO: 'Texto do Local para Soltar -> Texto do Item para Arrastar', com cada par em uma nova linha.`,
-                    options: `Itens para Arrastar:\n${draggables}\n\nLocais para Soltar:\n${droppables}`,
-                };
-            },
+    async function performAction(aiAnswerText, quizData) {
+    if (!aiAnswerText) return;
 
-            multi_drag_into_blank(data) {
-                const prompts = data.dropZones.map(i => `- "${i.prompt}"`).join('\n');
-                const options = data.draggableOptions.map(i => `- "${i.text}"`).join('\n');
-                return {
-                    instruction: `Esta é uma questão de combinar múltiplas sentenças com suas expressões corretas. Responda com os pares no formato EXATO: 'Sentença da pergunta -> Expressão da opção', com cada par em uma nova linha.`,
-                    options: `Sentenças:\n${prompts}\n\nExpressões (Opções):\n${options}`,
-                };
-            },
-
-            equation(data) {
-                return {
-                    instruction: `Resolva a seguinte equação ou inequação. Forneça apenas a expressão final simplificada (ex: x = 5, ou y > 3).`,
-                    options: `EQUAÇÃO: "${data.questionText}"`,
-                };
-            },
-
-            dropdown(data) {
-                const opts = data.options?.map(o => `- "${o.text}"`).join('\n') || '';
-                return {
-                    instruction: `Responda APENAS com o texto exato da ÚNICA alternativa correta.`,
-                    options: `OPÇÕES:\n${opts}`,
-                };
-            },
-
-            single_choice(data) {
-                const opts = data.options.map(o => `- "${o.text}"`).join('\n');
-                return {
-                    instruction: `Responda APENAS com o texto exato da ÚNICA alternativa correta.`,
-                    options: `OPÇÕES:\n${opts}`,
-                };
-            },
-
-            multiple_choice(data) {
-                const opts = data.options.map(o => `- "${o.text}"`).join('\n');
-                return {
-                    instruction: `Responda APENAS com os textos exatos de TODAS as alternativas corretas, separando cada uma em uma NOVA LINHA.`,
-                    options: `OPÇÕES:\n${opts}`,
-                };
-            },
-
-            reorder(data) {
-                const items = data.draggableItems.map(i => `- "${i.text}"`).join('\n');
-                return {
-                    instruction: `A tarefa é: "${data.questionText}". Forneça a ordem correta listando os textos dos itens, um por linha, do primeiro ao último.`,
-                    options: `Itens para ordenar:\n${items}`,
-                };
-            },
-
-            drag_into_blank(data) {
-                const opts = data.draggableOptions.map(i => `- "${i.text}"`).join('\n');
-                return {
-                    instruction: `Responda APENAS com o texto da ÚNICA opção correta que preenche a lacuna.`,
-                    options: `Opções para arrastar:\n${opts}`,
-                };
-            },
-
-            open_ended() {
-                return {
-                    instruction: `Responda APENAS com a palavra ou frase curta que preenche a lacuna.`,
-                    options: '',
-                };
-            },
-        },
+    const getElementColor = (element) => {
+        const style = window.getComputedStyle(element);
+        const bgImage = style.backgroundImage;
+        if (bgImage && bgImage.includes('gradient')) {
+            const match = bgImage.match(/rgb\(\d+, \d+, \d+\)/);
+            if (match) return match[0];
+        }
+        return style.backgroundColor || 'rgba(0, 255, 0, 0.5)';
     };
 
-    // ═══════════════════════════════════════════════════════════════
-    // AI SERVICE
-    // ═══════════════════════════════════════════════════════════════
+    switch (quizData.questionType) {
+        case 'multi_dropdown':
+            const popperSelector = '.v-popper__popper--shown';
+            const answers = aiAnswerText.split('\n').map(line => {
+                const match = line.match(/\[RESPOSTA (\d+)\]:\s*(.*)/i);
+                if (!match) return null;
+                return {
+                    index: parseInt(match[1], 10) - 1,
+                    answer: match[2].trim().replace(/["'`]/g, '')
+                };
+            }).filter(Boolean);
 
-    const AIService = {
-        /**
-         * Sends question data to Gemini and returns the AI response.
-         */
-        async getAnswer(quizData) {
-            state.lastAiResponse = '';
-            UI.hideResponseButton();
+            const answersMap = new Map(answers.map(a => [a.index, a.answer]));
+            const placeholderText = 'Selecionar resposta';
 
-            const textPrompt = PromptBuilder.build(quizData);
-            const parts = await this._buildParts(textPrompt, quizData);
+            // Fase 1: Limpeza
+            console.log("FASE 1: Limpando dropdowns com respostas erradas ou desnecessárias...");
+            for (let i = 0; i < quizData.dropdowns.length; i++) {
+                const dd = quizData.dropdowns[i];
+                const currentButtonText = dd.button.innerText.trim();
+                const targetAnswer = answersMap.get(i);
 
-            return this._tryAllKeys(parts);
-        },
+                const isFilled = currentButtonText !== placeholderText;
+                const hasTarget = !!targetAnswer;
+                const isWrong = isFilled && hasTarget && currentButtonText !== targetAnswer;
+                const isUnnecessary = isFilled && !hasTarget;
 
-        /**
-         * Builds the multimodal parts array for the Gemini API.
-         */
-        async _buildParts(textPrompt, quizData) {
-            const parts = [{ text: textPrompt }];
-
-            // Add question image if present
-            if (quizData.questionImageUrl) {
-                const imagePart = await this._createImagePart(quizData.questionImageUrl);
-                if (imagePart) parts.push(imagePart);
-            }
-
-            // Add draggable images for image match questions
-            if (quizData.questionType === 'match_image_to_text') {
-                parts.push({ text: '\n\nIMAGENS (Itens para Arrastar):\n' });
-                for (const item of quizData.draggableItems) {
-                    const imagePart = await this._createImagePart(item.imageUrl);
-                    if (imagePart) {
-                        parts.push(imagePart);
-                        parts.push({ text: `- ${item.id}` });
+                if (isWrong || isUnnecessary) {
+                    console.log(`Limpando Dropdown #${i + 1} (estava com "${currentButtonText}")...`);
+                    dd.button.click();
+                    try {
+                        const optionElements = await waitForElement(`${popperSelector} button.dropdown-option`, true, 2000);
+                        const selectedOption = Array.from(optionElements).find(el => el.innerText.trim() === currentButtonText);
+                        if (selectedOption) {
+                            selectedOption.click();
+                        } else {
+                            document.body.click();
+                        }
+                        await waitForElementToDisappear(popperSelector, 2000);
+                    } catch (e) {
+                        console.error(`Erro ao tentar limpar Dropdown #${i + 1}: ${e.message}`);
+                        if (document.querySelector(popperSelector)) {
+                            document.body.click();
+                            try { await waitForElementToDisappear(popperSelector, 2000); } catch (err) {}
+                        }
                     }
                 }
             }
 
-            return parts;
-        },
-
-        /**
-         * Creates an inline_data image part for the API.
-         */
-        async _createImagePart(url) {
-            const base64 = await Utils.imageToBase64(url);
-            if (!base64) return null;
-
-            const [header, data] = base64.split(',');
-            let mimeType = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
-            if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
-                mimeType = 'image/jpeg';
+            // Fase 2: Preenchimento
+            console.log("FASE 2: Preenchendo respostas corretas da IA...");
+            for (const res of answers) {
+                const dd = quizData.dropdowns[res.index];
+                if (!dd) {
+                    console.error(`Dropdown com índice ${res.index} não encontrado.`);
+                    continue;
+                }
+                const currentButtonText = dd.button.innerText.trim();
+                if (currentButtonText === res.answer) {
+                    continue;
+                }
+                dd.button.click();
+                try {
+                    const optionElements = await waitForElement(`${popperSelector} button.dropdown-option`, true, 2000);
+                    const targetOption = Array.from(optionElements).find(el => el.innerText.trim() === res.answer);
+                    if (targetOption) {
+                        if (targetOption.disabled || targetOption.classList.contains('used-option')) {
+                            console.warn(`Opção "${res.answer}" para Dropdown #${res.index + 1} ainda está desabilitada.`);
+                            document.body.click();
+                        } else {
+                            targetOption.click();
+                        }
+                    } else {
+                        console.error(`Opção "${res.answer}" não encontrada no Dropdown #${res.index + 1}. (A IA pode ter alucinado)`);
+                        document.body.click();
+                    }
+                    await waitForElementToDisappear(popperSelector, 2000);
+                } catch (e) {
+                    console.error(`Erro ao tentar selecionar para o dropdown #${res.index + 1}: ${e.message}`);
+                    if (document.querySelector(popperSelector)) {
+                        document.body.click();
+                        try { await waitForElementToDisappear(popperSelector, 2000); } catch (err) {}
+                    }
+                }
             }
+            break;
 
-            return { inline_data: { mime_type: mimeType, data } };
-        },
+        case 'multi_drag_into_blank':
+            const highlightColors = ['#FFD700', '#00FFFF', '#FF00FF', '#7FFF00', '#FF8C00', '#DA70D6'];
+            let colorIndex = 0;
+            const cleanPairPartMulti = (str) => str.replace(/[`"']/g, '').trim();
+            const pairingsMulti = aiAnswerText.split('\n').filter(line => line.includes('->')).map(line => {
+                const parts = line.split('->');
+                return parts.length === 2 ? [cleanPairPartMulti(parts[0]), cleanPairPartMulti(parts[1])] : null;
+            }).filter(Boolean);
+            if (pairingsMulti.length === 0) { console.error("Não foi possível extrair pares válidos da resposta da IA."); return; }
+            const draggableMap = new Map(quizData.draggableOptions.map(i => [i.text, i.element]));
+            const dropZoneMap = new Map(quizData.dropZones.map(i => [i.prompt, i.blankElement]));
+            for (const [promptText, optionText] of pairingsMulti) {
+                const bestPromptMatch = [...dropZoneMap.keys()].find(key => key.includes(promptText) || promptText.includes(key));
+                const blankEl = dropZoneMap.get(bestPromptMatch);
+                const optionEl = draggableMap.get(optionText);
+                if (blankEl && optionEl) {
+                    const color = highlightColors[colorIndex % highlightColors.length];
+                    const highlightStyle = `box-shadow: 0 0 15px 5px ${color}; border-radius: 4px;`;
+                    blankEl.style.cssText = highlightStyle;
+                    optionEl.style.cssText = highlightStyle;
+                    colorIndex++;
+                } else {
+                    console.warn(`Par não encontrado no DOM: "${promptText}" -> "${optionText}"`);
+                }
+            }
+            break;
 
-        /**
-         * Tries each API key in rotation until one succeeds.
-         */
-        async _tryAllKeys(parts) {
-            const keys = CONFIG.apiKeys;
-            let lastError = '';
+        case 'equation':
+            const KEYPAD_MAP = {
+                '0': 'icon-fas-0', '1': 'icon-fas-1', '2': 'icon-fas-2', '3': 'icon-fas-3', '4': 'icon-fas-4',
+                '5': 'icon-fas-5', '6': 'icon-fas-6', '7': 'icon-fas-7', '8': 'icon-fas-8', '9': 'icon-fas-9',
+                '+': 'icon-fas-plus', '-': 'icon-fas-minus', '*': 'icon-fas-times', '×': 'icon-fas-times',
+                '/': 'icon-fas-divide', '÷': 'icon-fas-divide', '=': 'icon-fas-equals', '.': 'icon-fas-period',
+                '<': 'icon-fas-less-than', '>': 'icon-fas-greater-than',
+                '≤': 'icon-fas-less-than-equal', '≥': 'icon-fas-greater-than-equal',
+                'x': 'icon-fas-variable', 'y': 'icon-fas-variable', 'z': 'icon-fas-variable',
+                '(': 'icon-fas-brackets-round', ')': 'icon-fas-brackets-round',
+                'π': 'icon-fas-pi', 'e': 'icon-fas-euler',
+            };
+            let answerSequence = aiAnswerText.trim().replace(/\s/g, '').replace(/<=/g, '≤').replace(/>=/g, '≥');
+            console.log(`Digitando a resposta: ${answerSequence}`);
+            const editor = document.querySelector('div[data-cy="equation-editor"]');
+            if (editor) {
+                editor.click();
+                await new Promise(r => setTimeout(r, 100));
+            } else {
+                console.error("Não foi possível encontrar o editor de equação para focar.");
+                return;
+            }
+            for (const char of answerSequence) {
+                const iconClass = KEYPAD_MAP[char.toLowerCase()];
+                if (iconClass) {
+                    const keyElement = document.querySelector(`.editor-button i.${iconClass}`);
+                    if (keyElement) {
+                        const button = keyElement.closest('button');
+                        if (button) {
+                            button.click();
+                            await new Promise(r => setTimeout(r, 100));
+                        }
+                    } else {
+                        console.error(`Não foi possível encontrar a tecla para o caractere: "${char}" (ícone: ${iconClass})`);
+                    }
+                } else {
+                    console.error(`Caractere não mapeado no teclado: "${char}"`);
+                }
+            }
+            break;
 
-            for (let i = 0; i < keys.length; i++) {
-                const key = keys[state.currentKeyIndex];
+        case 'reorder':
+            const cleanText = (str) => str.replace(/["'`]/g, '').trim();
+            const orderedItems = aiAnswerText.split('\n').map(cleanText).filter(Boolean);
+            const draggablesMapReorder = new Map(quizData.draggableItems.map(i => [i.text, i.element]));
+            const dropZonesInOrder = quizData.dropZones;
+            if (orderedItems.length === dropZonesInOrder.length) {
+                for (let i = 0; i < orderedItems.length; i++) {
+                    const sourceText = orderedItems[i];
+                    const sourceEl = draggablesMapReorder.get(sourceText);
+                    const destinationEl = dropZonesInOrder[i].element;
+                    if (sourceEl && destinationEl) {
+                        const color = getElementColor(sourceEl);
+                        const highlightStyle = `box-shadow: 0 0 15px 5px ${color}; border-radius: 8px;`;
+                        sourceEl.style.cssText = highlightStyle;
+                        destinationEl.style.cssText = highlightStyle;
+                    }
+                }
+            }
+            break;
 
-                // Skip placeholder keys
-                if (!key || key.includes('SUA_') || key.includes('CHAVE_') || key.length < 30) {
-                    console.warn(`API key #${state.currentKeyIndex + 1} is a placeholder. Skipping...`);
-                    state.currentKeyIndex = (state.currentKeyIndex + 1) % keys.length;
+        case 'drag_into_blank':
+            const cleanAiAnswerBlank = aiAnswerText.trim().replace(/["'`]/g, '');
+            const targetOption = quizData.draggableOptions.find(opt => opt.text === cleanAiAnswerBlank);
+            if (targetOption) {
+                const color = getElementColor(targetOption.element);
+                const highlightStyle = `box-shadow: 0 0 15px 5px ${color}`;
+                targetOption.element.style.cssText = highlightStyle;
+                quizData.dropZone.element.style.cssText = highlightStyle;
+            }
+            break;
+
+        case 'match_image_to_text':
+            const highlightColorsImg = ['#FFD700', '#00FFFF', '#FF00FF', '#7FFF00', '#FF8C00', '#DA70D6'];
+            let colorIndexImg = 0;
+
+            const cleanPairPartImg = (str) => str.replace(/[`"\[\]]/g, '').trim();
+
+            const pairingsImg = aiAnswerText.split('\n').filter(line => line.includes('->')).map(line => {
+                const parts = line.split('->');
+                return parts.length === 2 ? [cleanPairPartImg(parts[0]), cleanPairPartImg(parts[1])] : null;
+            }).filter(Boolean);
+
+            if (pairingsImg.length === 0) { console.error("Não foi possível extrair pares válidos (Texto -> ID Imagem) da resposta da IA."); return; }
+
+            const draggablesMapImg = new Map(quizData.draggableItems.map(i => [i.id, i.element]));
+            const dropZonesMapImg = new Map(quizData.dropZones.map(i => [i.text, i.element]));
+
+            for (const [partA, partB] of pairingsImg) {
+                let sourceEl, destinationEl;
+                if (dropZonesMapImg.has(partA) && draggablesMapImg.has(partB)) {
+                    destinationEl = dropZonesMapImg.get(partA);
+                    sourceEl = draggablesMapImg.get(partB);
+                } else if (dropZonesMapImg.has(partB) && draggablesMapImg.has(partA)) {
+                    destinationEl = dropZonesMapImg.get(partB);
+                    sourceEl = draggablesMapImg.get(partA);
+                } else {
+                    console.warn(`Par não mapeado: "${partA}" (existe? ${dropZonesMapImg.has(partA)}) -> "${partB}" (existe? ${draggablesMapImg.has(partB)})`);
                     continue;
                 }
 
-                const url = `${CONFIG.apiBaseUrl}?key=${key}`;
-
-                try {
-                    const response = await Utils.fetchWithTimeout(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ contents: [{ parts }] }),
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-                        if (!text) throw new Error('Empty response from API.');
-
-                        console.log(`Success with API key #${state.currentKeyIndex + 1}.`);
-                        console.log('Raw AI response:', text);
-                        state.lastAiResponse = text;
-                        return text;
-                    }
-
-                    const errorData = await response.json().catch(() => ({}));
-                    lastError = errorData.error?.message || `Error ${response.status}`;
-                    console.warn(`Key #${state.currentKeyIndex + 1} failed: ${lastError}`);
-                } catch (error) {
-                    lastError = error.message;
-                    console.warn(`Key #${state.currentKeyIndex + 1} error: ${lastError}`);
+                if (sourceEl && destinationEl) {
+                    const color = highlightColorsImg[colorIndexImg % highlightColorsImg.length];
+                    const highlightStyle = `box-shadow: 0 0 15px 5px ${color}; border-radius: 8px;`;
+                    sourceEl.style.cssText = highlightStyle;
+                    destinationEl.style.cssText = highlightStyle;
+                    colorIndexImg++;
                 }
-
-                state.lastAiResponse = `Key #${state.currentKeyIndex + 1} failed: ${lastError}`;
-                state.currentKeyIndex = (state.currentKeyIndex + 1) % keys.length;
             }
+            break;
 
-            throw new Error('All Gemini API keys failed.');
-        },
-    };
-
-    // ═══════════════════════════════════════════════════════════════
-    // ACTION PERFORMER
-    // ═══════════════════════════════════════════════════════════════
-
-    const ActionPerformer = {
-        /**
-         * Executes the appropriate action based on question type and AI answer.
-         */
-        async perform(aiAnswer, quizData) {
-            if (!aiAnswer) return;
-
-            const handler = this._handlers[quizData.questionType];
-            if (handler) {
-                await handler.call(this, aiAnswer, quizData);
-            } else {
-                this._handleChoice(aiAnswer, quizData);
+        case 'match_order':
+            const cleanPairPart = (str) => str.replace(/[`"']/g, '').trim();
+            const pairings = aiAnswerText.split('\n').filter(line => line.includes('->')).map(line => {
+                const parts = line.split('->');
+                return parts.length === 2 ? [cleanPairPart(parts[0]), cleanPairPart(parts[1])] : null;
+            }).filter(Boolean);
+            if (pairings.length === 0) { console.error("Não foi possível extrair pares válidos da resposta da IA."); return; }
+            const draggablesMapMatch = new Map(quizData.draggableItems.map(i => [i.text, i.element]));
+            const dropZonesMap = new Map(quizData.dropZones.map(i => [i.text, i.element]));
+            for (const [partA, partB] of pairings) {
+                let sourceEl, destinationEl;
+                if (dropZonesMap.has(partA) && draggablesMapMatch.has(partB)) {
+                    destinationEl = dropZonesMap.get(partA);
+                    sourceEl = draggablesMapMatch.get(partB);
+                } else if (dropZonesMap.has(partB) && draggablesMapMatch.has(partA)) {
+                    destinationEl = dropZonesMap.get(partB);
+                    sourceEl = draggablesMapMatch.get(partA);
+                } else { continue; }
+                if (sourceEl && destinationEl) {
+                    const color = getElementColor(sourceEl);
+                    const highlightStyle = `box-shadow: 0 0 15px 5px ${color}; border-radius: 8px;`;
+                    sourceEl.style.cssText = highlightStyle;
+                    destinationEl.style.cssText = highlightStyle;
+                }
             }
-        },
+            break;
 
-        _handlers: {
-            multi_dropdown: async function (aiAnswer, quizData) {
-                await MultiDropdownHandler.execute(aiAnswer, quizData);
-            },
+        default:
+            const normalize = (str) => {
+                if (typeof str !== 'string') return '';
+                let cleaned = str.replace(/[^a-zA-Z\u00C0-\u017F0-9\s²³]/g, '').replace(/\s+/g, ' ');
+                return cleaned.trim().toLowerCase();
+            };
 
-            multi_drag_into_blank(aiAnswer, quizData) {
-                const pairings = Utils.parsePairings(aiAnswer);
-                if (pairings.length === 0) {
-                    console.error('Could not extract valid pairs from AI response.');
-                    return;
-                }
-
-                const dragMap = new Map(quizData.draggableOptions.map(i => [i.text, i.element]));
-                const dropMap = new Map(quizData.dropZones.map(i => [i.prompt, i.blankElement]));
-
-                let colorIdx = 0;
-                for (const [promptText, optionText] of pairings) {
-                    const bestKey = [...dropMap.keys()].find(
-                        k => k.includes(promptText) || promptText.includes(k)
-                    );
-                    const blankEl = dropMap.get(bestKey);
-                    const optionEl = dragMap.get(optionText);
-
-                    if (blankEl && optionEl) {
-                        HighlightHelper.applyColor(blankEl, optionEl, colorIdx++);
-                    } else {
-                        console.warn(`Pair not found in DOM: "${promptText}" -> "${optionText}"`);
-                    }
-                }
-            },
-
-            equation: async function (aiAnswer) {
-                await EquationHandler.type(aiAnswer);
-            },
-
-            reorder(aiAnswer, quizData) {
-                const items = aiAnswer.split('\n').map(Utils.cleanQuotes).filter(Boolean);
-                const dragMap = new Map(quizData.draggableItems.map(i => [i.text, i.element]));
-                const drops = quizData.dropZones;
-
-                if (items.length !== drops.length) {
-                    console.warn(`Reorder count mismatch: ${items.length} vs ${drops.length}`);
-                    return;
-                }
-
-                items.forEach((text, i) => {
-                    const sourceEl = dragMap.get(text);
-                    const destEl = drops[i].element;
-                    if (sourceEl && destEl) {
-                        const color = HighlightHelper.getElementColor(sourceEl);
-                        HighlightHelper.applyStyle(sourceEl, color);
-                        HighlightHelper.applyStyle(destEl, color);
-                    }
+            if (quizData.questionType === 'open_ended') {
+                await new Promise(resolve => {
+                    quizData.answerElement.focus();
+                    quizData.answerElement.value = aiAnswerText.trim();
+                    quizData.answerElement.dispatchEvent(new Event('input', { bubbles: true }));
+                    setTimeout(resolve, 100);
                 });
-            },
-
-            drag_into_blank(aiAnswer, quizData) {
-                const cleaned = Utils.cleanQuotes(aiAnswer.trim());
-                const target = quizData.draggableOptions.find(o => o.text === cleaned);
-
-                if (target) {
-                    const color = HighlightHelper.getElementColor(target.element);
-                    HighlightHelper.applyStyle(target.element, color);
-                    HighlightHelper.applyStyle(quizData.dropZone.element, color);
-                }
-            },
-
-            match_image_to_text(aiAnswer, quizData) {
-                MatchHandler.highlightPairs(aiAnswer, quizData, true);
-            },
-
-            match_order(aiAnswer, quizData) {
-                MatchHandler.highlightPairs(aiAnswer, quizData, false);
-            },
-
-            open_ended: async function (aiAnswer, quizData) {
-                const el = quizData.answerElement;
-                el.focus();
-                el.value = aiAnswer.trim();
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                await Utils.delay(100);
-                await Utils.delay(500);
-                document.querySelector(CONFIG.selectors.submitButton)?.click();
-            },
-        },
-
-        _handleChoice(aiAnswer, quizData) {
-            if (quizData.questionType === 'multiple_choice') {
-                const answers = aiAnswer.split('\n').map(Utils.normalize).filter(Boolean);
+                setTimeout(() => document.querySelector('.submit-button-wrapper button, button.submit-btn')?.click(), 500);
+            } else if (quizData.questionType === 'multiple_choice') {
+                const aiAnswers = aiAnswerText.split('\n').map(normalize).filter(Boolean);
                 quizData.options.forEach(opt => {
-                    if (answers.includes(Utils.normalize(opt.text))) {
+                    if (aiAnswers.includes(normalize(opt.text))) {
                         opt.element.style.border = '5px solid #00FF00';
                         opt.element.click();
                     }
                 });
             } else if (quizData.questionType === 'single_choice') {
-                const normalized = Utils.normalize(aiAnswer);
-                const match = quizData.options.find(
-                    o => Utils.normalize(o.text) === normalized
-                );
+                const normalizedAiAnswer = normalize(aiAnswerText);
+                const bestMatch = quizData.options.find(opt => {
+                    const normalizedOption = normalize(opt.text);
+                    return normalizedOption === normalizedAiAnswer;
+                });
 
-                if (match) {
-                    console.log('Match found!', match.element);
-                    match.element.style.border = '5px solid #00FF00';
-                    match.element.click();
+                if (bestMatch) {
+                    console.log("Correspondência encontrada!", bestMatch.element);
+                    bestMatch.element.style.border = '5px solid #00FF00';
+                    bestMatch.element.click();
                 } else {
-                    console.warn('No exact match found after normalization.');
+                    console.warn("Nenhuma correspondência exata encontrada após normalização.");
                 }
             }
-        },
-    };
+            break;
+    }
+}
 
-    // ═══════════════════════════════════════════════════════════════
-    // SPECIALIZED HANDLERS
-    // ═══════════════════════════════════════════════════════════════
+    async function resolverQuestao() {
+    const button = document.getElementById('ai-solver-button');
+    button.disabled = true;
+    button.innerText = "Pensando...";
+    button.style.transform = 'scale(0.95)';
+    button.style.boxShadow = '0 0 0 rgba(0,0,0,0)';
+    try {
+        const quizData = await extrairDadosDaQuestao();
+        if (!quizData) {
+            alert("Não foi possível extrair os dados da questão.");
+            return;
+        }
 
-    const HighlightHelper = {
-        getElementColor(element) {
-            const style = window.getComputedStyle(element);
-            const bg = style.backgroundImage;
-            if (bg?.includes('gradient')) {
-                const match = bg.match(/rgb\(\d+, \d+, \d+\)/);
-                if (match) return match[0];
-            }
-            return style.backgroundColor || 'rgba(0, 255, 0, 0.5)';
-        },
-
-        applyStyle(el, color) {
-            el.style.cssText = `box-shadow: 0 0 15px 5px ${color}; border-radius: 8px;`;
-        },
-
-        applyColor(el1, el2, index) {
-            const color = CONFIG.highlightColors[index % CONFIG.highlightColors.length];
-            const style = `box-shadow: 0 0 15px 5px ${color}; border-radius: 4px;`;
-            el1.style.cssText = style;
-            el2.style.cssText = style;
-        },
-    };
-
-    const MatchHandler = {
-        highlightPairs(aiAnswer, quizData, isImageMatch) {
-            const pairings = Utils.parsePairings(aiAnswer);
-            if (pairings.length === 0) {
-                console.error('Could not extract valid pairs from AI response.');
-                return;
-            }
-
-            const dragMap = isImageMatch
-                ? new Map(quizData.draggableItems.map(i => [i.id, i.element]))
-                : new Map(quizData.draggableItems.map(i => [i.text, i.element]));
-            const dropMap = new Map(quizData.dropZones.map(i => [i.text, i.element]));
-
-            let colorIdx = 0;
-            for (const [partA, partB] of pairings) {
-                let sourceEl, destEl;
-
-                // Try both orderings
-                const cleanA = isImageMatch ? partA.replace(/[\[\]]/g, '') : partA;
-                const cleanB = isImageMatch ? partB.replace(/[\[\]]/g, '') : partB;
-
-                if (dropMap.has(cleanA) && dragMap.has(cleanB)) {
-                    destEl = dropMap.get(cleanA);
-                    sourceEl = dragMap.get(cleanB);
-                } else if (dropMap.has(cleanB) && dragMap.has(cleanA)) {
-                    destEl = dropMap.get(cleanB);
-                    sourceEl = dragMap.get(cleanA);
-                } else {
-                    console.warn(`Unmapped pair: "${partA}" -> "${partB}"`);
-                    continue;
-                }
-
-                if (sourceEl && destEl) {
-                    if (isImageMatch) {
-                        HighlightHelper.applyColor(sourceEl, destEl, colorIdx++);
+        if (quizData.questionType === 'multi_dropdown') {
+             console.log("Usando IA para resolver múltiplos dropdowns (lógica de pool)...");
+             const aiAnswer = await obterRespostaDaIA(quizData);
+             if (aiAnswer) {
+                 await performAction(aiAnswer, quizData);
+             }
+        } else if (quizData.questionType === 'dropdown') {
+            console.log("Iniciando fluxo otimizado para Dropdown...");
+            quizData.dropdownButton.click();
+            try {
+                const optionElements = await waitForElement('.v-popper__popper--shown button.dropdown-option', true);
+                quizData.options = Array.from(optionElements).map(el => ({ text: el.innerText.trim() }));
+                const aiAnswer = await obterRespostaDaIA(quizData);
+                if (aiAnswer) {
+                    const cleanAiAnswerDrop = aiAnswer.trim().replace(/["'`]/g, '');
+                    const targetOptionDrop = Array.from(optionElements).find(el => el.innerText.trim() === cleanAiAnswerDrop);
+                    if (targetOptionDrop) {
+                        targetOptionDrop.click();
                     } else {
-                        const color = HighlightHelper.getElementColor(sourceEl);
-                        HighlightHelper.applyStyle(sourceEl, color);
-                        HighlightHelper.applyStyle(destEl, color);
-                    }
-                }
-            }
-        },
-    };
-
-    const MultiDropdownHandler = {
-        async execute(aiAnswer, quizData) {
-            const { popperShown } = CONFIG.selectors;
-            const placeholderText = 'Selecionar resposta';
-
-            // Parse AI answers
-            const answers = aiAnswer.split('\n')
-                .map(line => {
-                    const match = line.match(/\[RESPOSTA (\d+)\]:\s*(.*)/i);
-                    if (!match) return null;
-                    return {
-                        index: parseInt(match[1], 10) - 1,
-                        answer: match[2].trim().replace(/["'`]/g, ''),
-                    };
-                })
-                .filter(Boolean);
-
-            const answersMap = new Map(answers.map(a => [a.index, a.answer]));
-
-            // Phase 1: Clear wrong/unnecessary selections
-            console.log('Phase 1: Clearing incorrect dropdown values...');
-            for (let i = 0; i < quizData.dropdowns.length; i++) {
-                const dd = quizData.dropdowns[i];
-                const currentText = dd.button.innerText.trim();
-                const target = answersMap.get(i);
-
-                const isFilled = currentText !== placeholderText;
-                const needsClear = isFilled && (!target || currentText !== target);
-
-                if (needsClear) {
-                    console.log(`Clearing dropdown #${i + 1} ("${currentText}")...`);
-                    await this._clickDropdownOption(dd.button, currentText, popperShown);
-                }
-            }
-
-            // Phase 2: Fill correct answers
-            console.log('Phase 2: Filling correct answers...');
-            for (const { index, answer } of answers) {
-                const dd = quizData.dropdowns[index];
-                if (!dd) {
-                    console.error(`Dropdown at index ${index} not found.`);
-                    continue;
-                }
-
-                if (dd.button.innerText.trim() === answer) continue;
-
-                dd.button.click();
-                try {
-                    const options = await Utils.waitForElement(
-                        `${popperShown} ${CONFIG.selectors.dropdownOption}`,
-                        { all: true, timeout: CONFIG.timeouts.popperWait }
-                    );
-                    const target = Array.from(options).find(
-                        el => el.innerText.trim() === answer
-                    );
-
-                    if (target && !target.disabled && !target.classList.contains('used-option')) {
-                        target.click();
-                    } else {
-                        console.warn(`Option "${answer}" not available for dropdown #${index + 1}`);
+                        console.error(`Não foi possível encontrar a opção dropdown com o texto: "${cleanAiAnswerDrop}"`);
                         document.body.click();
                     }
-                    await Utils.waitForDisappear(popperShown, CONFIG.timeouts.popperWait)
-                        .catch(() => {});
-                } catch (e) {
-                    console.error(`Error selecting dropdown #${index + 1}: ${e.message}`);
-                    await Utils.closePopper();
-                }
-            }
-        },
-
-        async _clickDropdownOption(button, text, popperSelector) {
-            button.click();
-            try {
-                const options = await Utils.waitForElement(
-                    `${popperSelector} ${CONFIG.selectors.dropdownOption}`,
-                    { all: true, timeout: CONFIG.timeouts.popperWait }
-                );
-                const target = Array.from(options).find(el => el.innerText.trim() === text);
-                if (target) {
-                    target.click();
                 } else {
-                    document.body.click();
+                     document.body.click();
                 }
-                await Utils.waitForDisappear(popperSelector, CONFIG.timeouts.popperWait)
-                    .catch(() => {});
-            } catch (e) {
-                console.error(`Error clearing dropdown: ${e.message}`);
-                await Utils.closePopper();
-            }
-        },
-    };
-
-    const EquationHandler = {
-        KEYPAD_MAP: {
-            '0': 'icon-fas-0', '1': 'icon-fas-1', '2': 'icon-fas-2',
-            '3': 'icon-fas-3', '4': 'icon-fas-4', '5': 'icon-fas-5',
-            '6': 'icon-fas-6', '7': 'icon-fas-7', '8': 'icon-fas-8',
-            '9': 'icon-fas-9', '+': 'icon-fas-plus', '-': 'icon-fas-minus',
-            '*': 'icon-fas-times', '×': 'icon-fas-times', '/': 'icon-fas-divide',
-            '÷': 'icon-fas-divide', '=': 'icon-fas-equals', '.': 'icon-fas-period',
-            '<': 'icon-fas-less-than', '>': 'icon-fas-greater-than',
-            '≤': 'icon-fas-less-than-equal', '≥': 'icon-fas-greater-than-equal',
-            'x': 'icon-fas-variable', 'y': 'icon-fas-variable', 'z': 'icon-fas-variable',
-            '(': 'icon-fas-brackets-round', ')': 'icon-fas-brackets-round',
-            'π': 'icon-fas-pi', 'e': 'icon-fas-euler',
-        },
-
-        async type(aiAnswer) {
-            const sequence = aiAnswer.trim()
-                .replace(/\s/g, '')
-                .replace(/<=/g, '≤')
-                .replace(/>=/g, '≥');
-
-            console.log(`Typing equation answer: ${sequence}`);
-
-            const editor = document.querySelector(CONFIG.selectors.equationEditor);
-            if (!editor) {
-                console.error('Equation editor not found.');
-                return;
-            }
-
-            editor.click();
-            await Utils.delay(CONFIG.timeouts.keypadDelay);
-
-            for (const char of sequence) {
-                const iconClass = this.KEYPAD_MAP[char.toLowerCase()];
-                if (!iconClass) {
-                    console.error(`Unmapped character: "${char}"`);
-                    continue;
-                }
-
-                const icon = document.querySelector(`.editor-button i.${iconClass}`);
-                const button = icon?.closest('button');
-                if (button) {
-                    button.click();
-                    await Utils.delay(CONFIG.timeouts.keypadDelay);
-                } else {
-                    console.error(`Key not found for: "${char}" (${iconClass})`);
-                }
-            }
-        },
-    };
-
-    // ═══════════════════════════════════════════════════════════════
-    // MAIN SOLVER
-    // ═══════════════════════════════════════════════════════════════
-
-    async function solveQuestion() {
-        const button = document.getElementById('ai-solver-button');
-        UI.setButtonState(button, true);
-
-        try {
-            const quizData = await QuestionExtractor.extract();
-            if (!quizData) {
-                alert('Não foi possível extrair os dados da questão.');
-                return;
-            }
-
-            // Multi-dropdown: need to populate options pool first
-            if (quizData.questionType === 'multi_dropdown') {
-                await populateDropdownOptions(quizData);
-                const aiAnswer = await AIService.getAnswer(quizData);
-                if (aiAnswer) await ActionPerformer.perform(aiAnswer, quizData);
-                return;
-            }
-
-            // Single dropdown: open it first to get options
-            if (quizData.questionType === 'dropdown') {
-                await handleSingleDropdown(quizData);
-                return;
-            }
-
-            // Local math solver shortcut
-            if (tryLocalMathSolver(quizData)) return;
-
-            // Default: use AI
-            console.log('Using AI to solve...');
-            const aiAnswer = await AIService.getAnswer(quizData);
-            if (aiAnswer) await ActionPerformer.perform(aiAnswer, quizData);
-        } catch (error) {
-            console.error('Unexpected error in solve flow:', error);
-            if (!error.message?.includes('cancelada')) {
-                alert('Erro: ' + error.message);
-            }
-        } finally {
-            UI.setButtonState(button, false);
-            UI.showResponseButtonIfNeeded();
-        }
-    }
-
-    async function populateDropdownOptions(quizData) {
-        const firstBtn = quizData._dropdownButtons[0];
-        firstBtn.click();
-        try {
-            const optionEls = await Utils.waitForElement(
-                `${CONFIG.selectors.popperShown} ${CONFIG.selectors.dropdownOption}`,
-                { all: true, timeout: CONFIG.timeouts.popperWait }
-            );
-            quizData.allAvailableOptions = Array.from(optionEls)
-                .map(el => el.innerText.trim());
-            console.log('Options pool detected:', quizData.allAvailableOptions);
-        } catch (e) {
-            console.error('Failed to read dropdown options pool.', e);
-        }
-        await Utils.closePopper();
-    }
-
-    async function handleSingleDropdown(quizData) {
-        console.log('Optimized dropdown flow...');
-        quizData.dropdownButton.click();
-
-        try {
-            const optionEls = await Utils.waitForElement(
-                `${CONFIG.selectors.popperShown} ${CONFIG.selectors.dropdownOption}`,
-                { all: true }
-            );
-            quizData.options = Array.from(optionEls).map(el => ({
-                text: el.innerText.trim(),
-            }));
-
-            const aiAnswer = await AIService.getAnswer(quizData);
-            if (aiAnswer) {
-                const cleaned = Utils.cleanQuotes(aiAnswer.trim());
-                const target = Array.from(optionEls).find(
-                    el => el.innerText.trim() === cleaned
-                );
-
-                if (target) {
-                    target.click();
-                } else {
-                    console.error(`Dropdown option not found: "${cleaned}"`);
-                    document.body.click();
-                }
-            } else {
+            } catch (error) {
+                console.error("Falha ao processar o dropdown:", error.message);
                 document.body.click();
             }
-        } catch (error) {
-            console.error('Failed to process dropdown:', error.message);
-            document.body.click();
+        } else {
+            const isMath = quizData.options && quizData.options.length > 0 && (quizData.options[0].text.includes('\\') || quizData.questionText.toLowerCase().includes('value of'));
+            const matchValue = quizData.questionText.match(/value of ([\d.]+)/i);
+            if (isMath && matchValue) {
+                console.log("Questão de matemática detectada. Resolvendo localmente...");
+                const targetValue = parseFloat(matchValue[1]);
+                quizData.options.forEach(option => {
+                    const computableExpr = (() => {
+                        let c = option.text.replace(/\\left/g, '').replace(/\\right/g, '').replace(/\\div/g, '/').replace(/\\times/g, '*').replace(/\\ /g, '').replace(/(\d+)\s*\(/g, '$1 * (').replace(/\)\s*(\d+)/g, ') * $1');
+                        c = c.replace(/(\d+)\\frac\{(\d+)\}\{(\d+)\}/g, '($1+$2/$3)');
+                        c = c.replace(/\\frac\{(\d+)\}\{(\d+)\}/g, '($1/$2)');
+                        return c;
+                    })();
+                    const result = (() => { try { return new Function('return ' + computableExpr)(); } catch (e) { return null; } })();
+                    if (result !== null && Math.abs(result - targetValue) < 0.001) {
+                        option.element.style.border = '5px solid #00FF00';
+                        option.element.click();
+                    }
+                });
+            } else {
+                console.log("Usando IA para resolver...");
+                const aiAnswer = await obterRespostaDaIA(quizData);
+                if (aiAnswer) {
+                    await performAction(aiAnswer, quizData);
+                }
+            }
         }
+    } catch (error) {
+        console.error("Um erro inesperado ocorreu no fluxo principal:", error);
+        if (error.message && !error.message.includes("Ação cancelada")) {
+            alert("Ocorreu um erro: " + error.message);
+        }
+    } finally {
+        const viewResponseBtn = document.getElementById('view-raw-response-btn');
+        if (viewResponseBtn && lastAiResponse) {
+            viewResponseBtn.style.display = 'block';
+        }
+        button.disabled = false;
+        button.innerText = "✨ Resolver";
+        button.style.transform = 'scale(1)';
+        button.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.2)';
+    }
+}
+
+    // --- LÓGICA DA UI (v50) ---
+
+    function mostrarAvisoDeepSeekImagem() {
+        return new Promise((resolve, reject) => {
+            const oldModal = document.getElementById('deepseek-warning-modal');
+            if (oldModal) oldModal.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'deepseek-warning-modal';
+            Object.assign(overlay.style, {
+                position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+                backgroundColor: 'rgba(0, 0, 0, 0.6)', zIndex: '2147483648',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'opacity 0.2s ease', opacity: '0'
+            });
+
+            const modalContainer = document.createElement('div');
+            Object.assign(modalContainer.style, {
+                background: 'rgba(26, 27, 30, 0.9)', backdropFilter: 'blur(10px)',
+                padding: '24px', borderRadius: '16px', color: 'white',
+                fontFamily: 'system-ui, sans-serif', maxWidth: '400px',
+                textAlign: 'center', boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)',
+                border: '1px solid rgba(255, 255, 255, 0.1)'
+            });
+
+            const title = document.createElement('h3');
+            title.innerText = '⚠️ DeepSeek Não Vê Imagens';
+            Object.assign(title.style, {
+                margin: '0 0 12px 0', fontSize: '18px', fontWeight: '600'
+            });
+
+            const message = document.createElement('p');
+            message.innerText = 'Esta pergunta contém uma ou mais imagens que o DeepSeek não pode processar. O que você deseja fazer?';
+            Object.assign(message.style, {
+                margin: '0 0 20px 0', fontSize: '14px', lineHeight: '1.5',
+                color: 'rgba(255, 255, 255, 0.8)'
+            });
+
+            const buttonContainer = document.createElement('div');
+            Object.assign(buttonContainer.style, {
+                display: 'flex', flexDirection: 'column', gap: '10px'
+            });
+
+            const closeModal = () => {
+                overlay.style.opacity = '0';
+                setTimeout(() => overlay.remove(), 200);
+            };
+
+            const btnGemini = document.createElement('button');
+            btnGemini.innerText = 'Usar a Gemini (Recomendado)';
+            Object.assign(btnGemini.style, {
+                background: 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)',
+                border: 'none', borderRadius: '8px', color: 'white', cursor: 'pointer',
+                fontSize: '14px', fontWeight: '500', padding: '12px',
+                transition: 'all 0.2s ease'
+            });
+            btnGemini.onmouseover = () => btnGemini.style.opacity = '0.9';
+            btnGemini.onmouseout = () => btnGemini.style.opacity = '1';
+            btnGemini.onclick = () => {
+                closeModal();
+                resolve('gemini');
+            };
+
+            const btnNoImage = document.createElement('button');
+            btnNoImage.innerText = 'Responder sem enviar Imagem';
+            Object.assign(btnNoImage.style, {
+                background: 'rgba(255, 255, 255, 0.1)',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                borderRadius: '8px', color: 'rgba(255, 255, 255, 0.8)',
+                cursor: 'pointer', fontSize: '14px', fontWeight: '500',
+                padding: '12px', transition: 'all 0.2s ease'
+            });
+            btnNoImage.onmouseover = () => btnNoImage.style.background = 'rgba(255, 255, 255, 0.15)';
+            btnNoImage.onmouseout = () => btnNoImage.style.background = 'rgba(255, 255, 255, 0.1)';
+            btnNoImage.onclick = () => {
+                closeModal();
+                resolve('sem_imagem');
+            };
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    closeModal();
+                    reject(new Error('Ação cancelada.'));
+                }
+            };
+
+            buttonContainer.appendChild(btnGemini);
+            buttonContainer.appendChild(btnNoImage);
+            modalContainer.appendChild(title);
+            modalContainer.appendChild(message);
+            modalContainer.appendChild(buttonContainer);
+            overlay.appendChild(modalContainer);
+            document.body.appendChild(overlay);
+
+            setTimeout(() => overlay.style.opacity = '1', 10);
+        });
     }
 
-    function tryLocalMathSolver(quizData) {
-        if (!quizData.options || quizData.options.length === 0) return false;
+    /**
+     * Torna o painel flutuante arrastável. (v50)
+     * @param {HTMLElement} panel - O elemento principal do painel.
+     * @param {HTMLElement} handle - O elemento que aciona o arraste (neste caso, o próprio painel).
+     */
+    function makeDraggable(panel, handle) {
+        let offsetX = 0, offsetY = 0, isDragging = false;
 
-        const isMath = quizData.options[0].text.includes('\\')
-            || quizData.questionText.toLowerCase().includes('value of');
-        const matchValue = quizData.questionText.match(/value of ([\d.]+)/i);
+        handle.addEventListener('mousedown', (e) => {
+            // Previne o arraste se o clique foi em um botão ou link
+            if (e.target.tagName === 'BUTTON' || e.target.closest('a')) return;
 
-        if (!isMath || !matchValue) return false;
+            isDragging = true;
+            const rect = panel.getBoundingClientRect();
 
-        console.log('Math question detected. Solving locally...');
-        const targetValue = parseFloat(matchValue[1]);
+            // Converte a posição 'bottom'/'right' para 'top'/'left' na primeira vez
+            if (panel.style.bottom || panel.style.right) {
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+                panel.style.top = rect.top + 'px';
+                panel.style.left = rect.left + 'px';
+            }
 
-        quizData.options.forEach(option => {
-            const expr = option.text
-                .replace(/\\left|\\right/g, '')
-                .replace(/\\div/g, '/')
-                .replace(/\\times/g, '*')
-                .replace(/\\ /g, '')
-                .replace(/(\d+)\s*\(/g, '$1 * (')
-                .replace(/\)\s*(\d+)/g, ') * $1')
-                .replace(/(\d+)\\frac\{(\d+)\}\{(\d+)\}/g, '($1+$2/$3)')
-                .replace(/\\frac\{(\d+)\}\{(\d+)\}/g, '($1/$2)');
+            offsetX = e.clientX - panel.getBoundingClientRect().left;
+            offsetY = e.clientY - panel.getBoundingClientRect().top;
 
-            try {
-                const result = new Function('return ' + expr)();
-                if (result !== null && Math.abs(result - targetValue) < 0.001) {
-                    option.element.style.border = '5px solid #00FF00';
-                    option.element.click();
+            panel.style.transition = 'none'; // Desabilita transição suave durante o arraste
+            handle.style.cursor = 'grabbing';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+
+            let newX = e.clientX - offsetX;
+            let newY = e.clientY - offsetY;
+
+            // Mantém o painel dentro da tela
+            newX = Math.max(0, Math.min(newX, window.innerWidth - panel.offsetWidth));
+            newY = Math.max(0, Math.min(newY, window.innerHeight - panel.offsetHeight));
+
+            panel.style.top = newY + 'px';
+            panel.style.left = newX + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false;
+            panel.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out'; // Reabilita
+            handle.style.cursor = 'default';
+        });
+    }
+
+    function criarFloatingPanel() {
+        if (document.getElementById('mzzvxm-floating-panel')) return;
+        const panel = document.createElement('div');
+        panel.id = 'mzzvxm-floating-panel';
+        Object.assign(panel.style, {
+            position: 'fixed', bottom: '60px', right: '20px', zIndex: '2147483647',
+            display: 'flex', flexDirection: 'column', alignItems: 'stretch',
+            gap: '10px', padding: '12px', backgroundColor: 'rgba(26, 27, 30, 0.7)',
+            backdropFilter: 'blur(8px)', webkitBackdropFilter: 'blur(8px)', borderRadius: '16px',
+            boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)',
+            transition: 'transform 0.3s ease-out, opacity 0.3s ease-out',
+            transform: 'translateY(20px)', opacity: '0',
+            cursor: 'default'
+        });
+
+        const responseViewer = document.createElement('div');
+        responseViewer.id = 'ai-response-viewer';
+        Object.assign(responseViewer.style, {
+            display: 'none', position: 'absolute', bottom: 'calc(100% + 10px)', right: '0',
+            width: '300px', maxHeight: '200px', overflowY: 'auto',
+            background: 'rgba(10, 10, 15, 0.9)', backdropFilter: 'blur(5px)',
+            borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.2)',
+            padding: '12px', color: '#f0f0f0', fontSize: '12px',
+            fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)',
+            textAlign: 'left'
+        });
+        panel.appendChild(responseViewer);
+
+        const viewResponseBtn = document.createElement('button');
+        viewResponseBtn.id = 'view-raw-response-btn';
+        Object.assign(viewResponseBtn.style, {
+            background: 'none', border: '1px solid rgba(255, 255, 255, 0.2)',
+            color: 'rgba(255, 255, 255, 0.6)', cursor: 'pointer',
+            fontSize: '11px', padding: '4px 8px', borderRadius: '6px',
+            display: 'none', transition: 'all 0.2s ease',
+            marginBottom: '4px'
+        });
+        viewResponseBtn.innerText = 'Ver Resposta da IA';
+        viewResponseBtn.addEventListener('click', () => {
+            if (responseViewer.style.display === 'block') {
+                responseViewer.style.display = 'none';
+            } else {
+                responseViewer.innerText = lastAiResponse || "Nenhuma resposta da IA foi recebida ainda.";
+                responseViewer.style.display = 'block';
+            }
+        });
+        panel.appendChild(viewResponseBtn);
+
+        // --- Botão Ocultar (v50) ---
+        const toggleBtn = document.createElement('button');
+        toggleBtn.id = 'toggle-ui-btn';
+        toggleBtn.innerText = 'Ocultar';
+        Object.assign(toggleBtn.style, {
+            background: 'none', border: '1px solid rgba(255, 255, 255, 0.2)',
+            color: 'rgba(255, 255, 255, 0.6)', cursor: 'pointer',
+            fontSize: '11px', padding: '4px 8px', borderRadius: '6px',
+            transition: 'all 0.2s ease',
+            marginBottom: '4px'
+        });
+        panel.appendChild(toggleBtn);
+        // --- Fim do Botão Ocultar ---
+
+        const button = document.createElement('button');
+        button.id = 'ai-solver-button';
+        button.innerHTML = '✨ Resolver';
+        Object.assign(button.style, {
+            background: 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)',
+            border: 'none', borderRadius: '10px', color: 'white', cursor: 'pointer',
+            fontFamily: 'system-ui, sans-serif', fontSize: '15px', fontWeight: '600',
+            padding: '10px 20px', boxShadow: '0 4px 10px rgba(0, 0, 0, 0.2)',
+            transition: 'all 0.2s ease', letterSpacing: '0.5px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+        });
+        button.addEventListener('mouseover', () => { button.style.transform = 'translateY(-2px)'; button.style.boxShadow = '0 6px 15px rgba(0, 0, 0, 0.3)'; });
+        button.addEventListener('mouseout', () => { button.style.transform = 'translateY(0)'; button.style.boxShadow = '0 4px 10px rgba(0, 0, 0, 0.2)'; });
+        button.addEventListener('mousedown', () => { button.style.transform = 'translateY(1px)'; button.style.boxShadow = '0 2px 5px rgba(0, 0, 0, 0.15)'; });
+        button.addEventListener('mouseup', () => { button.style.transform = 'translateY(-2px)'; button.style.boxShadow = '0 6px 15px rgba(0, 0, 0, 0.3)'; });
+        button.addEventListener('click', resolverQuestao);
+        panel.appendChild(button);
+
+        const watermark = document.createElement('div');
+        watermark.id = 'mzzvxm-watermark'; // ID para ocultar
+        const githubIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 3c-.58.0-1.25.27-2 1.5c-2.2.86-4.5 1.3-7 1.3-2.5 0-4.7-.44-7-1.3-.75-1.23-1.42-1.5-2-1.5A5.07 5.07 0 0 0 4 4.77 5.44 5.44 0 0 0 2 10.71c0 6.13 3.49 7.34 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>`;
+        watermark.innerHTML = `
+            <div style="display: flex; gap: 8px; align-items: center; color: rgba(255,255,255,0.7); margin-top: 8px; justify-content: flex-end;">
+                <span style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 400;">@ricinuss</span>
+                <a href="https://github.com/ricinuss" target="_blank" title="GitHub" style="line-height: 0; color: inherit; transition: color 0.2s ease;">${githubIcon}</a>
+            </div>
+        `;
+        watermark.querySelectorAll('a').forEach(link => {
+            link.addEventListener('mouseover', () => link.style.color = 'white');
+            link.addEventListener('mouseout', () => link.style.color = 'rgba(255,255,255,0.7)');
+        });
+        panel.appendChild(watermark);
+        document.body.appendChild(panel);
+
+        // --- LÓGICA DE OCULTAR/MOSTRAR (v50) ---
+        const contentToToggle = [
+            'view-raw-response-btn',
+            'ai-solver-button',
+            'mzzvxm-watermark'
+        ];
+
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Previne que o clique no botão inicie o arraste
+            const isHidden = toggleBtn.innerText === 'Mostrar';
+            toggleBtn.innerText = isHidden ? 'Ocultar' : 'Mostrar';
+
+            contentToToggle.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.style.display = isHidden ? '' : 'none';
                 }
-            } catch {
-                // Expression evaluation failed, skip
+            });
+
+            // Re-aplica 'display: none' ao viewResponseBtn se ele já estava oculto
+            if (isHidden && !lastAiResponse) {
+                 document.getElementById('view-raw-response-btn').style.display = 'none';
             }
         });
 
-        return true;
+        // --- LÓGICA DE ARRASTAR (v50) ---
+        // A alça é o painel inteiro
+        makeDraggable(panel, panel);
+
+        setTimeout(() => {
+            panel.style.transform = 'translateY(0)';
+            panel.style.opacity = '1';
+        }, 100);
+        console.log("Floating Panel do resolvedor v50 criado com sucesso!");
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // UI MODULE
-    // ═══════════════════════════════════════════════════════════════
+    // --- LÓGICA DE DETECÇÃO DE QUIZ ID (v46) ---
 
-    const UI = {
-        setButtonState(button, loading) {
-            if (!button) return;
-            button.disabled = loading;
-            button.innerText = loading ? 'Pensando...' : '✨ Resolver';
-            button.style.transform = loading ? 'scale(0.95)' : 'scale(1)';
-            button.style.boxShadow = loading
-                ? '0 0 0 rgba(0,0,0,0)'
-                : '0 2px 8px rgba(0, 0, 0, 0.2)';
-        },
+    function logQuizId(id, source) {
+        if (id === quizIdDetected) {
+            return;
+        }
+        quizIdDetected = id;
+        console.log(`[Quizizz Bypass] Novo Quiz ID detectado (${source}): %c${id}`, "color: #00FF00; font-weight: bold;");
+    }
 
-        hideResponseButton() {
-            const btn = document.getElementById('view-raw-response-btn');
-            if (btn) btn.style.display = 'none';
-        },
+    function detectQuizIdFromURL() {
+        const match = window.location.pathname.match(regexQuizId);
+        return match ? match[1] : null;
+    }
 
-        showResponseButtonIfNeeded() {
-            const btn = document.getElementById('view-raw-response-btn');
-            if (btn && state.lastAiResponse) {
-                btn.style.display = 'block';
+    function interceptFetch() {
+        const originalFetch = window.fetch;
+        window.fetch = async function (...args) {
+            const [resource] = args;
+            if (typeof resource === 'string') {
+                const match = resource.match(regexQuizId);
+                if (match) {
+                    const id = match[1];
+                    logQuizId(id, "fetch");
+                }
             }
-        },
+            return originalFetch.apply(this, args);
+        };
+    }
 
-        createElement(tag, styles = {}, attrs = {}) {
-            const el = document.createElement(tag);
-            Object.assign(el.style, styles);
-            Object.entries(attrs).forEach(([k, v]) => {
-                if (k === 'innerHTML') el.innerHTML = v;
-                else if (k === 'innerText') el.innerText = v;
-                else el.setAttribute(k, v);
-            });
-            return el;
-        },
-
-        createPanel() {
-            if (document.getElementById('mzzvxm-floating-panel')) return;
-
-            const panel = this.createElement('div', {
-                position: 'fixed', bottom: '60px', right: '20px',
-                zIndex: '2147483647', display: 'flex', flexDirection: 'column',
-                alignItems: 'stretch', gap: '10px', padding: '12px',
-                backgroundColor: 'rgba(26, 27, 30, 0.7)',
-                backdropFilter: 'blur(8px)', webkitBackdropFilter: 'blur(8px)',
-                borderRadius: '16px', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)',
-                transition: 'transform 0.3s ease-out, opacity 0.3s ease-out',
-                transform: 'translateY(20px)', opacity: '0', cursor: 'default',
-            }, { id: 'mzzvxm-floating-panel' });
-
-            // Response viewer popup
-            const responseViewer = this._createResponseViewer();
-            panel.appendChild(responseViewer);
-
-            // View response button
-            const viewBtn = this._createViewResponseButton(responseViewer);
-            panel.appendChild(viewBtn);
-
-            // Toggle visibility button
-            const toggleBtn = this._createToggleButton();
-            panel.appendChild(toggleBtn);
-
-            // Solve button
-            const solveBtn = this._createSolveButton();
-            panel.appendChild(solveBtn);
-
-            // Watermark
-            const watermark = this._createWatermark();
-            panel.appendChild(watermark);
-
-            document.body.appendChild(panel);
-
-            // Setup toggle logic
-            this._setupToggle(toggleBtn, ['view-raw-response-btn', 'ai-solver-button', 'mzzvxm-watermark']);
-
-            // Make draggable
-            this._makeDraggable(panel);
-
-            // Animate in
-            requestAnimationFrame(() => {
-                panel.style.transform = 'translateY(0)';
-                panel.style.opacity = '1';
-            });
-
-            console.log('Floating panel created successfully!');
-        },
-
-        _createResponseViewer() {
-            return this.createElement('div', {
-                display: 'none', position: 'absolute',
-                bottom: 'calc(100% + 10px)', right: '0',
-                width: '300px', maxHeight: '200px', overflowY: 'auto',
-                background: 'rgba(10, 10, 15, 0.9)', backdropFilter: 'blur(5px)',
-                borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.2)',
-                padding: '12px', color: '#f0f0f0', fontSize: '12px',
-                fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)', textAlign: 'left',
-            }, { id: 'ai-response-viewer' });
-        },
-
-        _createViewResponseButton(viewer) {
-            const btn = this.createElement('button', {
-                background: 'none', border: '1px solid rgba(255, 255, 255, 0.2)',
-                color: 'rgba(255, 255, 255, 0.6)', cursor: 'pointer',
-                fontSize: '11px', padding: '4px 8px', borderRadius: '6px',
-                display: 'none', transition: 'all 0.2s ease', marginBottom: '4px',
-            }, { id: 'view-raw-response-btn', innerText: 'Ver Resposta da IA' });
-
-            btn.addEventListener('click', () => {
-                const isVisible = viewer.style.display === 'block';
-                viewer.style.display = isVisible ? 'none' : 'block';
-                if (!isVisible) {
-                    viewer.innerText = state.lastAiResponse || 'Nenhuma resposta recebida.';
+    function interceptXHR() {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            if (typeof url === 'string') {
+                const match = url.match(regexQuizId);
+                if (match) {
+                    const id = match[1];
+                    logQuizId(id, "XHR");
                 }
-            });
-
-            return btn;
-        },
-
-        _createToggleButton() {
-            return this.createElement('button', {
-                background: 'none', border: '1px solid rgba(255, 255, 255, 0.2)',
-                color: 'rgba(255, 255, 255, 0.6)', cursor: 'pointer',
-                fontSize: '11px', padding: '4px 8px', borderRadius: '6px',
-                transition: 'all 0.2s ease', marginBottom: '4px',
-            }, { id: 'toggle-ui-btn', innerText: 'Ocultar' });
-        },
-
-        _createSolveButton() {
-            const btn = this.createElement('button', {
-                background: 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)',
-                border: 'none', borderRadius: '10px', color: 'white',
-                cursor: 'pointer', fontFamily: 'system-ui, sans-serif',
-                fontSize: '15px', fontWeight: '600', padding: '10px 20px',
-                boxShadow: '0 4px 10px rgba(0, 0, 0, 0.2)',
-                transition: 'all 0.2s ease', letterSpacing: '0.5px',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                gap: '8px',
-            }, { id: 'ai-solver-button', innerHTML: '✨ Resolver' });
-
-            // Hover effects
-            btn.addEventListener('mouseover', () => {
-                btn.style.transform = 'translateY(-2px)';
-                btn.style.boxShadow = '0 6px 15px rgba(0, 0, 0, 0.3)';
-            });
-            btn.addEventListener('mouseout', () => {
-                btn.style.transform = 'translateY(0)';
-                btn.style.boxShadow = '0 4px 10px rgba(0, 0, 0, 0.2)';
-            });
-            btn.addEventListener('mousedown', () => {
-                btn.style.transform = 'translateY(1px)';
-                btn.style.boxShadow = '0 2px 5px rgba(0, 0, 0, 0.15)';
-            });
-            btn.addEventListener('mouseup', () => {
-                btn.style.transform = 'translateY(-2px)';
-                btn.style.boxShadow = '0 6px 15px rgba(0, 0, 0, 0.3)';
-            });
-            btn.addEventListener('click', solveQuestion);
-
-            return btn;
-        },
-
-        _createWatermark() {
-            const githubIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 3c-.58 0-1.25.27-2 1.5-2.2.86-4.5 1.3-7 1.3-2.5 0-4.7-.44-7-1.3-.75-1.23-1.42-1.5-2-1.5A5.07 5.07 0 0 0 4 4.77 5.44 5.44 0 0 0 2 10.71c0 6.13 3.49 7.34 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>`;
-
-            const wrapper = this.createElement('div', {}, { id: 'mzzvxm-watermark' });
-            wrapper.innerHTML = `
-                <div style="display:flex;gap:8px;align-items:center;color:rgba(255,255,255,0.7);margin-top:8px;justify-content:flex-end;">
-                    <span style="font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;font-size:13px;font-weight:400">@ricinuss</span>
-                    <a href="https://github.com/ricinuss" target="_blank" title="GitHub" style="line-height:0;color:inherit;transition:color 0.2s ease">${githubIcon}</a>
-                </div>`;
-
-            wrapper.querySelectorAll('a').forEach(link => {
-                link.addEventListener('mouseover', () => link.style.color = 'white');
-                link.addEventListener('mouseout', () => link.style.color = 'rgba(255,255,255,0.7)');
-            });
-
-            return wrapper;
-        },
-
-        _setupToggle(toggleBtn, elementIds) {
-            toggleBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const isHidden = toggleBtn.innerText === 'Mostrar';
-                toggleBtn.innerText = isHidden ? 'Ocultar' : 'Mostrar';
-
-                elementIds.forEach(id => {
-                    const el = document.getElementById(id);
-                    if (el) el.style.display = isHidden ? '' : 'none';
-                });
-
-                // Keep response button hidden if no response yet
-                if (isHidden && !state.lastAiResponse) {
-                    const respBtn = document.getElementById('view-raw-response-btn');
-                    if (respBtn) respBtn.style.display = 'none';
-                }
-            });
-        },
-
-        _makeDraggable(panel) {
-            let offsetX = 0, offsetY = 0, isDragging = false;
-
-            panel.addEventListener('mousedown', (e) => {
-                if (e.target.tagName === 'BUTTON' || e.target.closest('a')) return;
-
-                isDragging = true;
-                const rect = panel.getBoundingClientRect();
-
-                // Convert from bottom/right to top/left positioning
-                if (panel.style.bottom || panel.style.right) {
-                    panel.style.top = rect.top + 'px';
-                    panel.style.left = rect.left + 'px';
-                    panel.style.right = 'auto';
-                    panel.style.bottom = 'auto';
-                }
-
-                offsetX = e.clientX - rect.left;
-                offsetY = e.clientY - rect.top;
-                panel.style.transition = 'none';
-                panel.style.cursor = 'grabbing';
-            });
-
-            document.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
-                const x = Math.max(0, Math.min(e.clientX - offsetX, window.innerWidth - panel.offsetWidth));
-                const y = Math.max(0, Math.min(e.clientY - offsetY, window.innerHeight - panel.offsetHeight));
-                panel.style.top = y + 'px';
-                panel.style.left = x + 'px';
-            });
-
-            document.addEventListener('mouseup', () => {
-                if (!isDragging) return;
-                isDragging = false;
-                panel.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out';
-                panel.style.cursor = 'default';
-            });
-        },
-    };
-
-    // ═══════════════════════════════════════════════════════════════
-    // QUIZ ID DETECTOR
-    // ═══════════════════════════════════════════════════════════════
-
-    const QuizIdDetector = {
-        init() {
-            console.log('[Quizizz Bypass] Quiz ID detector loaded.');
-
-            const id = this._detectFromURL();
-            if (id) this._log(id, 'URL');
-
-            if (!state.interceptorsStarted) {
-                this._interceptFetch();
-                this._interceptXHR();
-                this._monitorSPA();
-                state.interceptorsStarted = true;
-                console.log('[Quizizz Bypass] Network interceptors started.');
             }
-        },
+            return originalOpen.apply(this, arguments);
+        };
+    }
 
-        _detectFromURL() {
-            const match = window.location.pathname.match(CONFIG.quizIdRegex);
-            return match?.[1] || null;
-        },
+    function initQuizIdDetector() {
+        console.log("[Quizizz Bypass] Detector de Quiz ID carregado.");
+        const id = detectQuizIdFromURL();
+        if (id) {
+            logQuizId(id, "URL");
+        }
 
-        _log(id, source) {
-            if (id === state.quizIdDetected) return;
-            state.quizIdDetected = id;
-            console.log(
-                `[Quizizz Bypass] Quiz ID detected (${source}): %c${id}`,
-                'color: #00FF00; font-weight: bold;'
-            );
-        },
+        if (!interceptorsStarted) {
+            console.log("[Quizizz Bypass] Iniciando interceptadores de rede (fetch/XHR).");
+            interceptFetch();
+            interceptXHR();
+            interceptorsStarted = true;
+        }
+    }
 
-        _interceptFetch() {
-            const originalFetch = window.fetch;
-            const self = this;
+    (function monitorSPA() {
+        const pushState = history.pushState;
+        history.pushState = function () {
+            const result = pushState.apply(this, arguments);
+            setTimeout(initQuizIdDetector, 300);
+            return result;
+        };
+        window.addEventListener("popstate", () => setTimeout(initQuizIdDetector, 300));
+    })();
 
-            window.fetch = async function (...args) {
-                const [resource] = args;
-                if (typeof resource === 'string') {
-                    const match = resource.match(CONFIG.quizIdRegex);
-                    if (match) self._log(match[1], 'fetch');
-                }
-                return originalFetch.apply(this, args);
-            };
-        },
+    // --- FIM DA LÓGICA DE DETECÇÃO DE QUIZ ID ---
 
-        _interceptXHR() {
-            const originalOpen = XMLHttpRequest.prototype.open;
-            const self = this;
 
-            XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-                if (typeof url === 'string') {
-                    const match = url.match(CONFIG.quizIdRegex);
-                    if (match) self._log(match[1], 'XHR');
-                }
-                return originalOpen.call(this, method, url, ...rest);
-            };
-        },
+    async function fetchWithTimeout(resource, options = {}, timeout = 15000) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        try {
+            const response = await fetch(resource, { ...options, signal: controller.signal });
+            clearTimeout(id);
+            return response;
+        } catch (error) {
+            clearTimeout(id);
+            if (error.name === 'AbortError') throw new Error('A requisição demorou muito e foi cancelada (Timeout).');
+            throw error;
+        }
+    }
 
-        _monitorSPA() {
-            const self = this;
-            const originalPushState = history.pushState;
+    async function imageUrlToBase64(url) {
+        try {
+            const cacheBustUrl = new URL(url);
+            cacheBustUrl.searchParams.set('_t', new Date().getTime());
 
-            history.pushState = function (...args) {
-                const result = originalPushState.apply(this, args);
-                setTimeout(() => self.init(), 300);
-                return result;
-            };
-
-            window.addEventListener('popstate', () => {
-                setTimeout(() => this.init(), 300);
+            const r = await fetchWithTimeout(cacheBustUrl.href, { cache: 'no-store' });
+            const b = await r.blob();
+            return new Promise((res, rej) => {
+                const reader = new FileReader();
+                reader.onloadend = () => res(reader.result);
+                reader.onerror = (e) => {
+                    console.error("Erro no FileReader:", e);
+                    rej(e);
+                };
+                reader.readAsDataURL(b);
             });
-        },
-    };
+        } catch (e) {
+            console.error(`Erro ao converter imagem: ${e.message}`, url);
+            return null;
+        }
+    }
 
-    // ═══════════════════════════════════════════════════════════════
-    // INITIALIZATION
-    // ═══════════════════════════════════════════════════════════════
-
-    setTimeout(() => UI.createPanel(), CONFIG.timeouts.uiDelay);
-    QuizIdDetector.init();
+    // --- Start ---
+    setTimeout(criarFloatingPanel, 2000); // Inicia a UI
+    initQuizIdDetector(); // Inicia o detector de ID
 
 })();
