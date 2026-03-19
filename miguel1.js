@@ -986,9 +986,9 @@
     })();
 
     // --- FIM DA LÓGICA DE DETECÇÃO DE QUIZ ID ---
-
-
-    async function fetchWithTimeout(resource, options = {}, timeout = 15000) {
+    
+    
+    async function fetchWithTimeout(resource, options = {}, timeout = 30000) { // Aumentado para 30s
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), timeout);
         try {
@@ -997,7 +997,9 @@
             return response;
         } catch (error) {
             clearTimeout(id);
-            if (error.name === 'AbortError') throw new Error('A requisição demorou muito e foi cancelada (Timeout).');
+            if (error.name === 'AbortError') {
+                throw new Error('Timeout: A requisição demorou mais de 30 segundos.');
+            }
             throw error;
         }
     }
