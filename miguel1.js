@@ -2,7 +2,7 @@
 // @name         Quizizz Bypass
 // @version      50.5
 // @description  Resolve questões do Quizizz
-// @author       ricinuss
+// @author       mzzvxm
 // @icon         https://tse1.mm.bing.net/th/id/OIP.Ydweh29BuHk_PGD4dGJXbAHaHa?rs=1&pid=ImgDetMain&o=7&rm=3
 // @match        https://wayground.com/join/game/*
 // @grant        none
@@ -12,18 +12,25 @@
     'use strict';
 
     // -----------------------------------------------------------------------------------
-    // IMPORTANTE: LISTA DE CHAVES DE API DO GEMINI (5 chaves)
+    // IMPORTANTE: LISTA DE CHAVES DE API
     // -----------------------------------------------------------------------------------
     const GEMINI_API_KEYS = [
-        "AIzaSyBgp_GrBJ9qESSFK4IhPxJGBgGQvT5FEGs",   // Chave 1
-        "AIzaSyCyEjanL1Am4PdRhM94nXR3tgUgw1mQe-U",   // Chave 2
-        "AIzaSyCJpMqZ-6Pm1T4kOkVZgcTPcG3iMCfBb3o",   // Chave 3
-        "AIzaSyCq-65Jha0KZMCPsI1NkW4Rgkc8Mz1r5mA",   // Chave 4
-        "AIzaSyCGbv6Dej-whe5OMjXPEPv9os3p1lm6ohI"    // Chave 5
+        "CHAVE_GEMINI_1",   // Chave 1
+        "CHAVE_GEMINI_2",  // Chave 2
+        "CHAVE_GEMINI_3"  // Chave 3
     ];
+    // --- Integração OpenRouter/DeepSeek (v47) ---
+    const OPENROUTER_API_KEYS = [
+        "SUA_CHAVE_OPENROUTER_1",
+        "SUA_CHAVE_OPENROUTER_2",
+        "SUA_CHAVE_OPENROUTER_3"
+    ];
+    const DEEPSEEK_MODEL_NAME = "deepseek/deepseek-chat"; // Modelo DeepSeek
+    let currentAiProvider = 'gemini'; // 'gemini' ou 'deepseek'
     // -----------------------------------------------------------------------------------
 
     let currentApiKeyIndex = 0;
+    let currentOpenRouterKeyIndex = 0;
     let lastAiResponse = '';
 
     // --- DETECÇÃO DE QUIZ ID (v46) ---
@@ -262,71 +269,167 @@
         if (quizData.questionImageUrl) {
             base64Image = await imageUrlToBase64(quizData.questionImageUrl);
         }
+        const hasDraggableImages = quizData.questionType === 'match_image_to_text';
 
-        // --- 3. Lógica de Fetch (Apenas Gemini) ---
+        // Verificação de Imagem do DeepSeek
+        if (currentAiProvider === 'deepseek' && (base64Image || hasDraggableImages)) {
+            console.warn("DeepSeek não suporta imagens. Mostrando aviso...");
+            try {
+                const acaoUsuario = await mostrarAvisoDeepSeekImagem();
+                if (acaoUsuario === 'gemini') {
+                    console.log("Usuário escolheu usar Gemini.");
+                    currentAiProvider = 'gemini';
+                    const aiToggleBtn = document.getElementById('ai-toggle-btn');
+                    if (aiToggleBtn) {
+                        aiToggleBtn.innerText = 'IA: Gemini';
+                        aiToggleBtn.style.color = 'rgba(255, 255, 255, 0.6)';
+                    }
+                } else if (acaoUsuario === 'sem_imagem') {
+                    console.log("Usuário escolheu enviar para o DeepSeek sem a imagem.");
+                    base64Image = null;
+                    if (quizData.questionType === 'match_image_to_text') {
+                        quizData.questionType = 'match_order'; // Downgrade
+                        quizData.draggableItems = quizData.draggableItems.map(item => ({
+                            text: item.id, // Usa "IMAGEM 1" como texto
+                            element: item.element
+                        }));
+                        promptDeInstrucao = `Responda com os pares no formato EXATO: 'Texto do Local para Soltar -> ID da Imagem' (ex: 90° -> IMAGEM 3), com cada par em uma nova linha.`;
+                        const draggables = quizData.draggableItems.map(item => `- "${item.text}"`).join('\n');
+                        const droppables = quizData.dropZones.map(item => `- "${item.text}"`).join('\n');
+                        formattedOptions = `Itens para Arrastar (IDs):\n${draggables}\n\nLocais para Soltar:\n${droppables}`;
+                        textPrompt = `${promptDeInstrucao}\n\n---\nPERGUNTA: "${quizData.questionText}"\n---\n${formattedOptions}`;
+                    }
+                }
+            } catch (error) {
+                console.error(error.message);
+                throw error;
+            }
+        }
+
+        // --- 3. Lógica de Fetch ---
         try {
             let aiResponseText = null;
-            console.log("Usando Provedor: Gemini");
-            let geminiKeyFailed = false;
-            for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
-                const currentKey = GEMINI_API_KEYS[currentApiKeyIndex];
-                if (!currentKey || currentKey.includes("CHAVE_GEMINI_") || currentKey.length < 30) {
-                    console.warn(`Chave de API Gemini #${currentApiKeyIndex + 1} parece ser um placeholder. Pulando...`);
+            if (currentAiProvider === 'gemini') {
+                console.log("Usando Provedor: Gemini");
+                let geminiKeyFailed = false;
+                for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+                    const currentKey = GEMINI_API_KEYS[currentApiKeyIndex];
+                    if (!currentKey || currentKey.includes("SUA_") || currentKey.length < 30) {
+                        console.warn(`Chave de API Gemini #${currentApiKeyIndex + 1} parece ser um placeholder. Pulando...`);
+                        currentApiKeyIndex = (currentApiKeyIndex + 1) % GEMINI_API_KEYS.length;
+                        continue;
+                    }
+                    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${currentKey}`;
+
+                    let promptParts = [{ text: textPrompt }];
+
+                    if (base64Image) {
+                        const [header, data] = base64Image.split(',');
+                        let mimeType = header.match(/:(.*?);/)[1];
+                        if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
+                        promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
+                    }
+
+                    if (quizData.questionType === 'match_image_to_text') {
+                        promptParts.push({ text: "\n\nIMAGENS (Itens para Arrastar):\n" });
+                        for (const item of quizData.draggableItems) {
+                             const base64 = await imageUrlToBase64(item.imageUrl);
+                             if (base64) {
+                                const [header, data] = base64.split(',');
+                                let mimeType = header.match(/:(.*?);/)[1];
+                                if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
+                                promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
+                                promptParts.push({ text: `- ${item.id}` }); // Envia " - IMAGEM 1"
+                             }
+                        }
+                    }
+
+                    try {
+                        const response = await fetchWithTimeout(API_URL, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ contents: [{ parts: promptParts }] })
+                        });
+                        if (response.ok) {
+                            const data = await response.json();
+                            aiResponseText = data.candidates[0].content.parts[0].text;
+                            console.log(`Sucesso com a Chave API Gemini #${currentApiKeyIndex + 1}.`);
+                            break;
+                        }
+                        const errorData = await response.json();
+                        const errorMessage = errorData.error?.message || `Erro ${response.status}`;
+                        console.warn(`Chave API Gemini #${currentApiKeyIndex + 1} falhou: ${errorMessage}. Tentando a próxima...`);
+                        lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${errorMessage}`;
+                    } catch (error) {
+                        console.warn(`Erro na requisição com a Chave API Gemini #${currentApiKeyIndex + 1}: ${error.message}. Tentando a próxima...`);
+                        lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${error.message}`;
+                    }
                     currentApiKeyIndex = (currentApiKeyIndex + 1) % GEMINI_API_KEYS.length;
-                    continue;
-                }
-                const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${currentKey}`;
-
-                let promptParts = [{ text: textPrompt }];
-
-                if (base64Image) {
-                    const [header, data] = base64Image.split(',');
-                    let mimeType = header.match(/:(.*?);/)[1];
-                    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
-                    promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
-                }
-
-                if (quizData.questionType === 'match_image_to_text') {
-                    promptParts.push({ text: "\n\nIMAGENS (Itens para Arrastar):\n" });
-                    for (const item of quizData.draggableItems) {
-                         const base64 = await imageUrlToBase64(item.imageUrl);
-                         if (base64) {
-                            const [header, data] = base64.split(',');
-                            let mimeType = header.match(/:(.*?);/)[1];
-                            if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) mimeType = 'image/jpeg';
-                            promptParts.push({ inline_data: { mime_type: mimeType, data: data } });
-                            promptParts.push({ text: `- ${item.id}` });
-                         }
+                    if (i === GEMINI_API_KEYS.length - 1) {
+                         geminiKeyFailed = true;
                     }
                 }
+                if (!aiResponseText && geminiKeyFailed) {
+                    throw new Error("Todas as chaves de API do Gemini falharam.");
+                }
 
-                try {
-                    const response = await fetchWithTimeout(API_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ contents: [{ parts: promptParts }] })
+            } else if (currentAiProvider === 'deepseek') {
+                console.log("Usando Provedor: DeepSeek (via OpenRouter)");
+                let deepseekKeyFailed = false;
+
+                for (let i = 0; i < OPENROUTER_API_KEYS.length; i++) {
+                    const currentKey = OPENROUTER_API_KEYS[currentOpenRouterKeyIndex];
+                    if (!currentKey || currentKey.includes("SUA_") || currentKey.length < 30) {
+                        console.warn(`Chave OpenRouter #${currentOpenRouterKeyIndex + 1} parece ser um placeholder. Pulando...`);
+                        currentOpenRouterKeyIndex = (currentOpenRouterKeyIndex + 1) % OPENROUTER_API_KEYS.length;
+                        continue;
+                    }
+
+                    const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+                    const body = JSON.stringify({
+                        model: DEEPSEEK_MODEL_NAME,
+                        messages: [ { role: 'user', content: textPrompt } ],
+                        max_tokens: 1024
                     });
-                    if (response.ok) {
-                        const data = await response.json();
-                        aiResponseText = data.candidates[0].content.parts[0].text;
-                        console.log(`Sucesso com a Chave API Gemini #${currentApiKeyIndex + 1}.`);
-                        break;
+
+                    try {
+                        const response = await fetchWithTimeout(API_URL, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${currentKey}`,
+                                'HTTP-Referer': 'https://github.com/mzzvxm',
+                                'X-Title': 'Quizizz Bypass Script'
+                            },
+                            body: body
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            aiResponseText = data.choices[0].message.content;
+                            console.log(`Sucesso com a Chave OpenRouter #${currentOpenRouterKeyIndex + 1}.`);
+                            break;
+                        }
+
+                        const errorData = await response.json();
+                        const errorMessage = errorData.error?.message || `Erro ${response.status}`;
+                        console.warn(`Chave OpenRouter #${currentOpenRouterKeyIndex + 1} falhou: ${errorMessage}. Tentando a próxima...`);
+                        lastAiResponse = `Falha na Chave OpenRouter #${currentOpenRouterKeyIndex + 1}: ${errorMessage}`;
+
+                    } catch (error) {
+                         console.warn(`Erro na requisição com a Chave OpenRouter #${currentOpenRouterKeyIndex + 1}: ${error.message}. Tentando a próxima...`);
+                         lastAiResponse = `Falha na Chave OpenRouter #${currentOpenRouterKeyIndex + 1}: ${error.message}`;
                     }
-                    const errorData = await response.json();
-                    const errorMessage = errorData.error?.message || `Erro ${response.status}`;
-                    console.warn(`Chave API Gemini #${currentApiKeyIndex + 1} falhou: ${errorMessage}. Tentando a próxima...`);
-                    lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${errorMessage}`;
-                } catch (error) {
-                    console.warn(`Erro na requisição com a Chave API Gemini #${currentApiKeyIndex + 1}: ${error.message}. Tentando a próxima...`);
-                    lastAiResponse = `Falha na Chave Gemini #${currentApiKeyIndex + 1}: ${error.message}`;
+
+                    currentOpenRouterKeyIndex = (currentOpenRouterKeyIndex + 1) % OPENROUTER_API_KEYS.length;
+                    if (i === OPENROUTER_API_KEYS.length - 1) {
+                        deepseekKeyFailed = true;
+                    }
                 }
-                currentApiKeyIndex = (currentApiKeyIndex + 1) % GEMINI_API_KEYS.length;
-                if (i === GEMINI_API_KEYS.length - 1) {
-                     geminiKeyFailed = true;
+
+                if (!aiResponseText && deepseekKeyFailed) {
+                    throw new Error("Todas as chaves de API do OpenRouter falharam.");
                 }
-            }
-            if (!aiResponseText && geminiKeyFailed) {
-                throw new Error("Todas as chaves de API do Gemini falharam.");
             }
 
             // --- 4. Retorno ---
@@ -335,7 +438,7 @@
             return aiResponseText;
 
         } catch (error) {
-            console.error(`Falha ao obter resposta da IA:`, error.message);
+            console.error(`Falha ao obter resposta da IA (${currentAiProvider}):`, error.message);
             lastAiResponse = `Erro: ${error.message}`;
             throw error;
         }
@@ -610,6 +713,7 @@
         default:
             const normalize = (str) => {
                 if (typeof str !== 'string') return '';
+                // (v48) Mantém letras, números, espaços, e símbolos ² e ³
                 let cleaned = str.replace(/[^a-zA-Z\u00C0-\u017F0-9\s²³]/g, '').replace(/\s+/g, ' ');
                 return cleaned.trim().toLowerCase();
             };
@@ -737,20 +841,118 @@
 
     // --- LÓGICA DA UI (v50) ---
 
+    function mostrarAvisoDeepSeekImagem() {
+        return new Promise((resolve, reject) => {
+            const oldModal = document.getElementById('deepseek-warning-modal');
+            if (oldModal) oldModal.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'deepseek-warning-modal';
+            Object.assign(overlay.style, {
+                position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+                backgroundColor: 'rgba(0, 0, 0, 0.6)', zIndex: '2147483648',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'opacity 0.2s ease', opacity: '0'
+            });
+
+            const modalContainer = document.createElement('div');
+            Object.assign(modalContainer.style, {
+                background: 'rgba(26, 27, 30, 0.9)', backdropFilter: 'blur(10px)',
+                padding: '24px', borderRadius: '16px', color: 'white',
+                fontFamily: 'system-ui, sans-serif', maxWidth: '400px',
+                textAlign: 'center', boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)',
+                border: '1px solid rgba(255, 255, 255, 0.1)'
+            });
+
+            const title = document.createElement('h3');
+            title.innerText = '⚠️ DeepSeek Não Vê Imagens';
+            Object.assign(title.style, {
+                margin: '0 0 12px 0', fontSize: '18px', fontWeight: '600'
+            });
+
+            const message = document.createElement('p');
+            message.innerText = 'Esta pergunta contém uma ou mais imagens que o DeepSeek não pode processar. O que você deseja fazer?';
+            Object.assign(message.style, {
+                margin: '0 0 20px 0', fontSize: '14px', lineHeight: '1.5',
+                color: 'rgba(255, 255, 255, 0.8)'
+            });
+
+            const buttonContainer = document.createElement('div');
+            Object.assign(buttonContainer.style, {
+                display: 'flex', flexDirection: 'column', gap: '10px'
+            });
+
+            const closeModal = () => {
+                overlay.style.opacity = '0';
+                setTimeout(() => overlay.remove(), 200);
+            };
+
+            const btnGemini = document.createElement('button');
+            btnGemini.innerText = 'Usar a Gemini (Recomendado)';
+            Object.assign(btnGemini.style, {
+                background: 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)',
+                border: 'none', borderRadius: '8px', color: 'white', cursor: 'pointer',
+                fontSize: '14px', fontWeight: '500', padding: '12px',
+                transition: 'all 0.2s ease'
+            });
+            btnGemini.onmouseover = () => btnGemini.style.opacity = '0.9';
+            btnGemini.onmouseout = () => btnGemini.style.opacity = '1';
+            btnGemini.onclick = () => {
+                closeModal();
+                resolve('gemini');
+            };
+
+            const btnNoImage = document.createElement('button');
+            btnNoImage.innerText = 'Responder sem enviar Imagem';
+            Object.assign(btnNoImage.style, {
+                background: 'rgba(255, 255, 255, 0.1)',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                borderRadius: '8px', color: 'rgba(255, 255, 255, 0.8)',
+                cursor: 'pointer', fontSize: '14px', fontWeight: '500',
+                padding: '12px', transition: 'all 0.2s ease'
+            });
+            btnNoImage.onmouseover = () => btnNoImage.style.background = 'rgba(255, 255, 255, 0.15)';
+            btnNoImage.onmouseout = () => btnNoImage.style.background = 'rgba(255, 255, 255, 0.1)';
+            btnNoImage.onclick = () => {
+                closeModal();
+                resolve('sem_imagem');
+            };
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    closeModal();
+                    reject(new Error('Ação cancelada.'));
+                }
+            };
+
+            buttonContainer.appendChild(btnGemini);
+            buttonContainer.appendChild(btnNoImage);
+            modalContainer.appendChild(title);
+            modalContainer.appendChild(message);
+            modalContainer.appendChild(buttonContainer);
+            overlay.appendChild(modalContainer);
+            document.body.appendChild(overlay);
+
+            setTimeout(() => overlay.style.opacity = '1', 10);
+        });
+    }
+
     /**
-     * Torna o painel flutuante arrastável.
+     * Torna o painel flutuante arrastável. (v50)
      * @param {HTMLElement} panel - O elemento principal do painel.
-     * @param {HTMLElement} handle - O elemento que aciona o arraste.
+     * @param {HTMLElement} handle - O elemento que aciona o arraste (neste caso, o próprio painel).
      */
     function makeDraggable(panel, handle) {
         let offsetX = 0, offsetY = 0, isDragging = false;
 
         handle.addEventListener('mousedown', (e) => {
+            // Previne o arraste se o clique foi em um botão ou link
             if (e.target.tagName === 'BUTTON' || e.target.closest('a')) return;
 
             isDragging = true;
             const rect = panel.getBoundingClientRect();
 
+            // Converte a posição 'bottom'/'right' para 'top'/'left' na primeira vez
             if (panel.style.bottom || panel.style.right) {
                 panel.style.right = 'auto';
                 panel.style.bottom = 'auto';
@@ -761,7 +963,7 @@
             offsetX = e.clientX - panel.getBoundingClientRect().left;
             offsetY = e.clientY - panel.getBoundingClientRect().top;
 
-            panel.style.transition = 'none';
+            panel.style.transition = 'none'; // Desabilita transição suave durante o arraste
             handle.style.cursor = 'grabbing';
         });
 
@@ -771,6 +973,7 @@
             let newX = e.clientX - offsetX;
             let newY = e.clientY - offsetY;
 
+            // Mantém o painel dentro da tela
             newX = Math.max(0, Math.min(newX, window.innerWidth - panel.offsetWidth));
             newY = Math.max(0, Math.min(newY, window.innerHeight - panel.offsetHeight));
 
@@ -781,7 +984,7 @@
         document.addEventListener('mouseup', () => {
             if (!isDragging) return;
             isDragging = false;
-            panel.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out';
+            panel.style.transition = 'transform 0.3s ease-out, opacity 0.3s ease-out'; // Reabilita
             handle.style.cursor = 'default';
         });
     }
@@ -835,7 +1038,7 @@
         });
         panel.appendChild(viewResponseBtn);
 
-        // --- Botão Ocultar ---
+        // --- Botão Ocultar (v50) ---
         const toggleBtn = document.createElement('button');
         toggleBtn.id = 'toggle-ui-btn';
         toggleBtn.innerText = 'Ocultar';
@@ -847,6 +1050,31 @@
             marginBottom: '4px'
         });
         panel.appendChild(toggleBtn);
+        // --- Fim do Botão Ocultar ---
+
+        const aiToggleBtn = document.createElement('button');
+        aiToggleBtn.id = 'ai-toggle-btn';
+        aiToggleBtn.innerText = 'IA: Gemini';
+        Object.assign(aiToggleBtn.style, {
+            background: 'none', border: '1px solid rgba(255, 255, 255, 0.2)',
+            color: 'rgba(255, 255, 255, 0.6)', cursor: 'pointer',
+            fontSize: '11px', padding: '4px 8px', borderRadius: '6px',
+            transition: 'all 0.2s ease',
+            marginBottom: '4px'
+        });
+        aiToggleBtn.addEventListener('click', () => {
+            if (currentAiProvider === 'gemini') {
+                currentAiProvider = 'deepseek';
+                aiToggleBtn.innerText = 'IA: DeepSeek';
+                aiToggleBtn.style.color = '#a78bfa';
+            } else {
+                currentAiProvider = 'gemini';
+                aiToggleBtn.innerText = 'IA: Gemini';
+                aiToggleBtn.style.color = 'rgba(255, 255, 255, 0.6)';
+            }
+            console.log(`Provedor de IA alterado para: ${currentAiProvider}`);
+        });
+        panel.appendChild(aiToggleBtn);
 
         const button = document.createElement('button');
         button.id = 'ai-solver-button';
@@ -867,12 +1095,14 @@
         panel.appendChild(button);
 
         const watermark = document.createElement('div');
-        watermark.id = 'mzzvxm-watermark';
+        watermark.id = 'mzzvxm-watermark'; // ID para ocultar
         const githubIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 3c-.58.0-1.25.27-2 1.5c-2.2.86-4.5 1.3-7 1.3-2.5 0-4.7-.44-7-1.3-.75-1.23-1.42-1.5-2-1.5A5.07 5.07 0 0 0 4 4.77 5.44 5.44 0 0 0 2 10.71c0 6.13 3.49 7.34 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>`;
+        const instagramIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line></svg>`;
         watermark.innerHTML = `
             <div style="display: flex; gap: 8px; align-items: center; color: rgba(255,255,255,0.7); margin-top: 8px; justify-content: flex-end;">
-                <span style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 400;">@ricinuss</span>
-                <a href="https://github.com/ricinuss" target="_blank" title="GitHub" style="line-height: 0; color: inherit; transition: color 0.2s ease;">${githubIcon}</a>
+                <span style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 400;">@mzzvxm</span>
+                <a href="https://github.com/mzzvxm" target="_blank" title="GitHub" style="line-height: 0; color: inherit; transition: color 0.2s ease;">${githubIcon}</a>
+                <a href="httpsa://instagram.com/mzzvxm" target="_blank" title="Instagram" style="line-height: 0; color: inherit; transition: color 0.2s ease;">${instagramIcon}</a>
             </div>
         `;
         watermark.querySelectorAll('a').forEach(link => {
@@ -882,15 +1112,16 @@
         panel.appendChild(watermark);
         document.body.appendChild(panel);
 
-        // --- LÓGICA DE OCULTAR/MOSTRAR ---
+        // --- LÓGICA DE OCULTAR/MOSTRAR (v50) ---
         const contentToToggle = [
             'view-raw-response-btn',
+            'ai-toggle-btn',
             'ai-solver-button',
             'mzzvxm-watermark'
         ];
 
         toggleBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
+            e.stopPropagation(); // Previne que o clique no botão inicie o arraste
             const isHidden = toggleBtn.innerText === 'Mostrar';
             toggleBtn.innerText = isHidden ? 'Ocultar' : 'Mostrar';
 
@@ -901,19 +1132,21 @@
                 }
             });
 
+            // Re-aplica 'display: none' ao viewResponseBtn se ele já estava oculto
             if (isHidden && !lastAiResponse) {
                  document.getElementById('view-raw-response-btn').style.display = 'none';
             }
         });
 
-        // --- LÓGICA DE ARRASTAR ---
+        // --- LÓGICA DE ARRASTAR (v50) ---
+        // A alça é o painel inteiro
         makeDraggable(panel, panel);
 
         setTimeout(() => {
             panel.style.transform = 'translateY(0)';
             panel.style.opacity = '1';
         }, 100);
-        console.log("Floating Panel do resolvedor criado com sucesso!");
+        console.log("Floating Panel do resolvedor v50 criado com sucesso!");
     }
 
     // --- LÓGICA DE DETECÇÃO DE QUIZ ID (v46) ---
@@ -986,9 +1219,9 @@
     })();
 
     // --- FIM DA LÓGICA DE DETECÇÃO DE QUIZ ID ---
-    
-    
-    async function fetchWithTimeout(resource, options = {}, timeout = 30000) { // Aumentado para 30s
+
+
+    async function fetchWithTimeout(resource, options = {}, timeout = 15000) {
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), timeout);
         try {
@@ -997,9 +1230,7 @@
             return response;
         } catch (error) {
             clearTimeout(id);
-            if (error.name === 'AbortError') {
-                throw new Error('Timeout: A requisição demorou mais de 30 segundos.');
-            }
+            if (error.name === 'AbortError') throw new Error('A requisição demorou muito e foi cancelada (Timeout).');
             throw error;
         }
     }
@@ -1027,7 +1258,7 @@
     }
 
     // --- Start ---
-    setTimeout(criarFloatingPanel, 2000);
-    initQuizIdDetector();
+    setTimeout(criarFloatingPanel, 2000); // Inicia a UI
+    initQuizIdDetector(); // Inicia o detector de ID
 
 })();
